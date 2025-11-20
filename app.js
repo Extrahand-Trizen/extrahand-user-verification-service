@@ -34,19 +34,19 @@ app.use(helmet({
   },
 }));
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: env.RATE_LIMIT_WINDOW_MS,
-  max: env.RATE_LIMIT_MAX_REQUESTS,
-  message: {
-    success: false,
-    error: 'Too many requests from this IP, please try again later.',
-    retryAfter: Math.ceil(env.RATE_LIMIT_WINDOW_MS / 1000 / 60),
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use('/api/', limiter);
+// Rate limiting - DISABLED temporarily
+// const limiter = rateLimit({
+//   windowMs: env.RATE_LIMIT_WINDOW_MS,
+//   max: env.RATE_LIMIT_MAX_REQUESTS,
+//   message: {
+//     success: false,
+//     error: 'Too many requests from this IP, please try again later.',
+//     retryAfter: Math.ceil(env.RATE_LIMIT_WINDOW_MS / 1000 / 60),
+//   },
+//   standardHeaders: true,
+//   legacyHeaders: false,
+// });
+// app.use('/api/', limiter);
 
 // CORS configuration
 const corsOptions = getCorsConfig(env);

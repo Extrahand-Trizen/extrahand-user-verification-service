@@ -4,7 +4,8 @@ const Verification = require('../models/Verification');
 const cashfreeService = require('../services/cashfreeService');
 const { getVerificationProvider } = require('../services/providerFactory');
 const { serviceAuthMiddleware } = require('../middleware/auth');
-const { otpGenerationLimiter, otpResendLimiter, otpVerificationLimiter } = require('../middleware/rateLimiting');
+// Rate limiters disabled temporarily
+// const { otpGenerationLimiter, otpResendLimiter, otpVerificationLimiter } = require('../middleware/rateLimiting');
 const { isValidAadhaarFormat, cleanAadhaarNumber, isValidOtpFormat, maskAadhaar } = require('../utils/validation');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
@@ -48,7 +49,7 @@ router.get('/features', (req, res) => {
  * Initiate Aadhaar KYC - Generate OTP
  * Rate limited: 3 requests per user per hour
  */
-router.post('/aadhaar/initiate', serviceAuthMiddleware, otpGenerationLimiter, async (req, res) => {
+router.post('/aadhaar/initiate', serviceAuthMiddleware, /* otpGenerationLimiter - DISABLED temporarily */ async (req, res) => {
   try {
     // Feature flag check
     if (!FEATURES.AADHAAR) {
@@ -217,7 +218,7 @@ router.post('/aadhaar/initiate', serviceAuthMiddleware, otpGenerationLimiter, as
  * Verify Aadhaar OTP
  * Rate limited: 10 attempts per user per 15 minutes
  */
-router.post('/aadhaar/verify', serviceAuthMiddleware, otpVerificationLimiter, async (req, res) => {
+router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter - DISABLED temporarily */ async (req, res) => {
   try {
     const userId = req.headers['x-user-id'] || req.body.userId;
     const { transactionId, refId, otp } = req.body;
@@ -382,7 +383,7 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, otpVerificationLimiter, as
  * Resend OTP for Aadhaar verification
  * Rate limited: 5 requests per user per hour
  */
-router.post('/aadhaar/resend', serviceAuthMiddleware, otpResendLimiter, async (req, res) => {
+router.post('/aadhaar/resend', serviceAuthMiddleware, /* otpResendLimiter - DISABLED temporarily */ async (req, res) => {
   try {
     const userId = req.headers['x-user-id'] || req.body.userId;
     const { refId } = req.body;
