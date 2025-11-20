@@ -17,8 +17,8 @@
     "CASHFREE_TEST_OTP": "111000",
     "MAIN_BACKEND_URL": "https://api.extrahand.in",
     "FEATURE_AADHAAR": "true",
-    "FEATURE_PAN": "false",
-    "FEATURE_BANK": "false",
+    "FEATURE_PAN": "true",
+    "FEATURE_BANK": "true",
     "FEATURE_FACE": "false",
     "FEATURE_LIVENESS": "false"
   },

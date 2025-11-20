@@ -623,15 +623,99 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
 
     logger.info('🔄 Verifying PAN', { userId, maskedPAN: panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4) });
 
+    // ✨ NEW: Check if PAN is already verified for this user
+    const existingVerification = await Verification.findOne({
+      userId,
+      type: 'pan',
+      status: 'verified'
+    });
+
+    if (existingVerification) {
+      logger.info('✅ PAN already verified for user', { userId, verificationId: existingVerification._id });
+      return res.json(successResponse({
+        verificationId: existingVerification._id,
+        maskedPAN: existingVerification.maskedPAN,
+        verifiedData: {
+          name: existingVerification.verifiedData?.name
+        },
+        status: 'verified',
+        alreadyVerified: true
+      }, 'PAN is already verified'));
+    }
+
     // Get verification provider
     const provider = getVerificationProvider(process.env);
     
+    // ✨ NEW: Check if provider supports PAN verification
+    if (!provider || typeof provider.verifyPAN !== 'function') {
+      logger.error('❌ Provider does not support PAN verification', {
+        provider: provider?.constructor?.name || 'unknown',
+        hasVerifyPAN: typeof provider?.verifyPAN === 'function'
+      });
+      return res.status(503).json(errorResponse(
+        'PAN verification not supported by current provider',
+        'PAN verification is not available with the current verification provider. Please contact support.',
+        'PROVIDER_NOT_SUPPORTED'
+      ));
+    }
+    
     // Call provider to verify PAN
-    const result = await provider.verifyPAN(panNumber);
+    logger.info('🔄 Calling provider.verifyPAN', { 
+      provider: provider.constructor?.name || 'unknown',
+      panMasked: panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4)
+    });
+    
+    let result;
+    try {
+      result = await provider.verifyPAN(panNumber);
+      logger.info('✅ Provider returned result', { 
+        success: result?.success,
+        hasData: !!result?.data
+      });
+    } catch (providerError) {
+      logger.error('❌ Provider.verifyPAN threw error', {
+        error: providerError.message,
+        stack: providerError.stack,
+        response: providerError.response?.data
+      });
+      throw providerError;
+    }
 
-    // Create verification record
+    // Create or update verification record
     const now = new Date();
-    const verification = await Verification.create({
+    
+    // ✨ NEW: Check if there's an existing verification record (even if failed)
+    let verification = await Verification.findOne({
+      userId,
+      type: 'pan'
+    });
+
+    if (verification) {
+      // Update existing record
+      verification.status = result.success ? 'verified' : 'failed';
+      verification.maskedPAN = result.data?.maskedPAN || (panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4));
+      verification.verifiedData = { 
+        name: result.data?.name,
+        panNumber: result.data?.panNumber,
+        status: result.data?.status
+      };
+      verification.verifiedAt = result.success ? now : null;
+      verification.failedAt = result.success ? null : now;
+      verification.failureReason = result.success ? null : result.message;
+      verification.auditLog.push({
+        action: result.success ? 'reverified' : 'retry_failed',
+        performedBy: userId,
+        performedAt: now,
+        ipAddress: getClientIp(req),
+        metadata: {
+          provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+          environment: process.env.CASHFREE_ENV || 'sandbox'
+        }
+      });
+      await verification.save();
+    } else {
+      // Create new verification record
+      verification = await Verification.create({
       userId,
       type: 'pan',
       status: result.success ? 'verified' : 'failed',
@@ -668,7 +752,8 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
         userAgent: req.get('user-agent') || 'unknown',
         environment: process.env.CASHFREE_ENV || 'sandbox'
       }
-    });
+      });
+    }
 
     logger.info('✅ PAN verification completed', { 
       userId, 
@@ -689,13 +774,42 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     logger.error('❌ PAN verification error', { 
       userId: req.headers['x-user-id'],
       error: error.message,
-      stack: error.stack
+      stack: error.stack,
+      errorName: error.name,
+      errorCode: error.code,
+      responseData: error.response?.data
     });
     
-    res.status(500).json(errorResponse(
-      error.message || 'Failed to verify PAN',
-      'An error occurred while verifying PAN'
-    ));
+    // Provide more informative error message
+    let errorMessage = error.message || 'Failed to verify PAN';
+    let userMessage = 'An error occurred while verifying PAN';
+    
+    // Handle specific error cases
+    if (error.message?.includes('not yet enabled') || error.message?.includes('Feature flag')) {
+      userMessage = 'PAN verification is not enabled. Please contact support.';
+      errorMessage = 'PAN verification feature not enabled';
+    } else if (error.message?.includes('Invalid PAN format')) {
+      userMessage = 'Invalid PAN number format. Please check and try again.';
+      errorMessage = error.message;
+    } else if (error.response?.data) {
+      // If it's an HTTP error from provider, use the provider's error message
+      errorMessage = error.response.data.message || error.response.data.error || error.message;
+      userMessage = errorMessage;
+    }
+    
+    const errorResponseObj = errorResponse(
+      errorMessage,
+      userMessage,
+      error.code || 'PAN_VERIFICATION_ERROR'
+    );
+    
+    // Add development details if needed
+    if (process.env.NODE_ENV === 'development') {
+      errorResponseObj.details = error.message;
+      errorResponseObj.stack = error.stack;
+    }
+    
+    res.status(500).json(errorResponseObj);
   }
 });
 
