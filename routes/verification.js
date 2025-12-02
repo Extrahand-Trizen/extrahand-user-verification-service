@@ -4,6 +4,7 @@ const Verification = require('../models/Verification');
 const cashfreeService = require('../services/cashfreeService');
 const { getVerificationProvider } = require('../services/providerFactory');
 const { serviceAuthMiddleware } = require('../middleware/auth');
+const userService = require('../services/userService');
 // Rate limiters disabled temporarily
 // const { otpGenerationLimiter, otpResendLimiter, otpVerificationLimiter } = require('../middleware/rateLimiting');
 const { isValidAadhaarFormat, cleanAadhaarNumber, isValidOtpFormat, maskAadhaar } = require('../utils/validation');
@@ -341,6 +342,33 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter 
         refId: verificationRefId,
         status: 'verified'
       });
+
+      // ✨ Update User Service with verification status
+      try {
+        const userServiceUpdate = await userService.updateAadhaarVerificationStatus(userId, {
+          maskedAadhaar: verifyResult.maskedAadhaar,
+          verifiedData: {
+            name: verifyResult.verifiedData.name,
+            gender: verifyResult.verifiedData.gender,
+            yearOfBirth: verifyResult.verifiedData.yearOfBirth
+          }
+        });
+
+        if (userServiceUpdate.success) {
+          logger.info('✅ User Service updated with Aadhaar verification', { userId });
+        } else {
+          logger.warn('⚠️ Failed to update User Service, but verification succeeded', {
+            userId,
+            error: userServiceUpdate.error
+          });
+        }
+      } catch (updateError) {
+        // Log but don't fail the verification response
+        logger.error('❌ Error updating User Service (non-blocking)', {
+          userId,
+          error: updateError.message
+        });
+      }
 
       res.json(successResponse({
         status: 'verified',
