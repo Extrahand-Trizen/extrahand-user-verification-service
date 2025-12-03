@@ -101,15 +101,63 @@ router.post('/aadhaar/initiate', serviceAuthMiddleware, /* otpGenerationLimiter 
       ip: getClientIp(req)
     });
 
-    // Check if verification already exists and is verified
+    // ✨ FIRST: Check User Service to see if user is already verified
+    try {
+      const userProfile = await userService.getUserProfile(userId);
+      // User Service returns { success: true, profile: { ... } }
+      // userProfile.data = { success: true, profile: { ... } }
+      const profile = userProfile.data?.profile || userProfile.data;
+      
+      logger.info('🔍 Checking User Service for verification status', {
+        userId,
+        hasData: !!userProfile.data,
+        hasProfile: !!profile,
+        isAadhaarVerified: profile?.isAadhaarVerified
+      });
+      
+      if (userProfile.success && profile?.isAadhaarVerified === true) {
+        logger.info('✅ User already verified in User Service', { 
+          userId,
+          verifiedAt: profile.aadhaarVerifiedAt
+        });
+        return res.status(200).json({
+          success: true,
+          message: 'Aadhaar is already verified',
+          data: {
+            alreadyVerified: true,
+            status: 'verified',
+            maskedAadhaar: profile.maskedAadhaar || maskAadhaar(cleanedAadhaar),
+            verifiedAt: profile.aadhaarVerifiedAt
+          },
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (userServiceError) {
+      // Log but don't fail - continue with verification service check
+      logger.warn('⚠️ Could not check User Service, continuing with verification service check', {
+        userId,
+        error: userServiceError.message,
+        stack: userServiceError.stack
+      });
+    }
+
+    // Check if verification already exists and is verified in verification service
     let verification = await Verification.findByUserId(userId);
     
     if (verification && verification.status === 'verified') {
-      logger.warn('⚠️ User already verified', { userId });
-      return res.status(400).json(errorResponse(
-        'User is already verified',
-        'This user has already completed Aadhaar verification'
-      ));
+      logger.warn('⚠️ User already verified in verification service', { userId });
+      // Return 200 with already verified status instead of 400 error
+      return res.status(200).json({
+        success: true,
+        message: 'Aadhaar is already verified',
+        data: {
+          alreadyVerified: true,
+          status: 'verified',
+          maskedAadhaar: verification.maskedAadhaar || maskAadhaar(cleanedAadhaar),
+          verifiedAt: verification.verifiedAt
+        },
+        timestamp: new Date().toISOString()
+      });
     }
 
     // Generate OTP via Cashfree
