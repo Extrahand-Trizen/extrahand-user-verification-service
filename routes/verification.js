@@ -382,7 +382,25 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter 
       }
     }
 
+    // ✨ LOG: Before saving verification to MongoDB
+    logger.info('💾 [MONGODB] Saving verification record to MongoDB', {
+      userId,
+      refId: verificationRefId,
+      status: verification.status,
+      verifiedAt: verification.verifiedAt,
+      verificationId: verification._id?.toString()
+    });
+    
     await verification.save();
+    
+    // ✨ LOG: After saving verification to MongoDB
+    logger.info('✅ [MONGODB] Verification record saved to MongoDB', {
+      userId,
+      refId: verificationRefId,
+      status: verification.status,
+      verificationId: verification._id?.toString(),
+      verifiedAt: verification.verifiedAt
+    });
 
     if (verifyResult.success) {
       logger.info('✅ Aadhaar OTP verified successfully', {
@@ -392,6 +410,16 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter 
       });
 
       // ✨ Update User Service with verification status
+      logger.info('📞 [VERIFICATION → USER SERVICE] Calling User Service to update Aadhaar verification status', {
+        userId,
+        maskedAadhaar: verifyResult.maskedAadhaar,
+        verifiedData: {
+          name: verifyResult.verifiedData.name,
+          gender: verifyResult.verifiedData.gender,
+          yearOfBirth: verifyResult.verifiedData.yearOfBirth
+        }
+      });
+      
       try {
         const userServiceUpdate = await userService.updateAadhaarVerificationStatus(userId, {
           maskedAadhaar: verifyResult.maskedAadhaar,
@@ -403,18 +431,25 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter 
         });
 
         if (userServiceUpdate.success) {
-          logger.info('✅ User Service updated with Aadhaar verification', { userId });
-        } else {
-          logger.warn('⚠️ Failed to update User Service, but verification succeeded', {
+          logger.info('✅ [VERIFICATION → USER SERVICE] User Service updated with Aadhaar verification', { 
             userId,
-            error: userServiceUpdate.error
+            responseData: userServiceUpdate.data
+          });
+        } else {
+          logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to update User Service, but verification succeeded', {
+            userId,
+            error: userServiceUpdate.error,
+            status: userServiceUpdate.status
           });
         }
       } catch (updateError) {
         // Log but don't fail the verification response
-        logger.error('❌ Error updating User Service (non-blocking)', {
+        logger.error('❌ [VERIFICATION → USER SERVICE] Error updating User Service (non-blocking)', {
           userId,
-          error: updateError.message
+          error: updateError.message,
+          stack: updateError.stack,
+          responseStatus: updateError.response?.status,
+          responseData: updateError.response?.data
         });
       }
 

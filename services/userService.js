@@ -28,23 +28,32 @@ class UserService {
         throw new Error('SERVICE_AUTH_TOKEN not configured');
       }
 
-      // Use PUT /api/v1/profiles/me endpoint with service auth
-      // The user service should accept service auth for this operation
-      const url = `${this.baseURL}/api/v1/profiles/me`;
+      // ✨ FIX: Use PATCH /api/v1/profiles/:uid/verification/aadhaar endpoint with service auth
+      // This is the correct endpoint for service-to-service Aadhaar verification updates
+      const url = `${this.baseURL}/api/v1/profiles/${userId}/verification/aadhaar`;
       
-      logger.info('📞 Calling User Service to update Aadhaar verification', {
+      const requestPayload = {
+        isAadhaarVerified: true,
+        aadhaarVerifiedAt: new Date().toISOString(),
+        ...verificationData
+      };
+      
+      logger.info('📞 [USER SERVICE] Calling User Service to update Aadhaar verification', {
         userId,
         url,
-        data: { ...verificationData, isAadhaarVerified: true }
+        method: 'PATCH',
+        payload: requestPayload,
+        headers: {
+          'X-Service-Auth': '***',
+          'X-Service-Name': 'verification-service',
+          'X-User-Id': userId
+        }
       });
 
-      const response = await axios.put(
+      // ✨ FIX: Use PATCH method (not PUT) for the verification endpoint
+      const response = await axios.patch(
         url,
-        {
-          isAadhaarVerified: true,
-          aadhaarVerifiedAt: new Date().toISOString(),
-          ...verificationData
-        },
+        requestPayload,
         {
           headers: {
             'Content-Type': 'application/json',
@@ -58,9 +67,11 @@ class UserService {
         }
       );
 
-      logger.info('✅ User Service updated Aadhaar verification status', {
+      logger.info('✅ [USER SERVICE] User Service updated Aadhaar verification status', {
         userId,
-        status: response.status
+        status: response.status,
+        statusText: response.statusText,
+        responseData: response.data
       });
 
       return {
@@ -68,11 +79,14 @@ class UserService {
         data: response.data
       };
     } catch (error) {
-      logger.error('❌ Failed to update User Service with Aadhaar verification', {
+      logger.error('❌ [USER SERVICE] Failed to update User Service with Aadhaar verification', {
         userId,
         error: error.message,
         status: error.response?.status,
-        data: error.response?.data
+        statusText: error.response?.statusText,
+        responseData: error.response?.data,
+        requestUrl: url,
+        requestPayload: requestPayload
       });
 
       // Don't throw - log and return failure so verification can still succeed
