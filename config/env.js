@@ -48,7 +48,7 @@ const envSchema = z.object({
   MAIN_BACKEND_URL: z.string().url().optional(),
   
   // User Service URL (for updating user profiles after verification)
-  USER_SERVICE_URL: z.string().url().optional().default('http://srv-captain--extrahand-user-service:4001'),
+  USER_SERVICE_URL: z.string().url().optional(),
   
   // Logging
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
