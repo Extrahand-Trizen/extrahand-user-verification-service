@@ -423,6 +423,8 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter 
       
       try {
         const userServiceUpdate = await userService.updateAadhaarVerificationStatus(userId, {
+          isAadhaarVerified: true,
+          aadhaarVerifiedAt: new Date().toISOString(),
           maskedAadhaar: verifyResult.maskedAadhaar,
           verifiedData: {
             name: verifyResult.verifiedData.name,
@@ -1022,6 +1024,70 @@ router.post('/bank/verify', serviceAuthMiddleware, async (req, res) => {
       verificationId: verification._id,
       status: verification.status 
     });
+
+    // ✨ Update User Service with bank verification status
+    logger.info('📞 [VERIFICATION → USER SERVICE] Calling User Service to update bank verification status', {
+      userId,
+      maskedBankAccount: verification.maskedBankAccount,
+      verifiedData: verification.verifiedData
+    });
+    
+    console.log('🔍 [DEBUG] Verification data before user-service call:', {
+      'verification.verifiedData': verification.verifiedData,
+      'verification.verifiedData.accountHolderName': verification.verifiedData?.accountHolderName,
+      'verification.verifiedData.bankName': verification.verifiedData?.bankName,
+      'verification.verifiedData.ifsc': verification.verifiedData?.ifsc
+    });
+    
+    try {
+      console.log('🔍 [DEBUG] About to call userService.updateBankVerificationStatus', {
+        userId,
+        USER_SERVICE_URL: process.env.USER_SERVICE_URL,
+        SERVICE_AUTH_TOKEN_PRESENT: !!process.env.SERVICE_AUTH_TOKEN,
+        verificationData: {
+          isBankVerified: true,
+          bankVerifiedAt: new Date().toISOString(),
+          maskedBankAccount: verification.maskedBankAccount,
+          bankAccount: {
+            accountHolderName: verification.verifiedData?.accountHolderName,
+            bankName: verification.verifiedData?.bankName,
+            ifsc: verification.verifiedData?.ifsc
+          }
+        }
+      });
+      
+      const userServiceUpdate = await userService.updateBankVerificationStatus(userId, {
+        isBankVerified: true,
+        bankVerifiedAt: new Date().toISOString(),
+        maskedBankAccount: verification.maskedBankAccount,
+        bankAccount: {
+          accountHolderName: verification.verifiedData?.accountHolderName,
+          bankName: verification.verifiedData?.bankName,
+          ifsc: verification.verifiedData?.ifsc
+        }
+      });
+
+      if (userServiceUpdate.success) {
+        logger.info('✅ [VERIFICATION → USER SERVICE] User Service updated with bank verification', { 
+          userId,
+          responseData: userServiceUpdate.data
+        });
+      } else {
+        logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to update User Service, but verification succeeded', {
+          userId,
+          error: userServiceUpdate.error,
+          status: userServiceUpdate.status
+        });
+      }
+    } catch (updateError) {
+      // Log but don't fail the verification response
+      logger.error('❌ [VERIFICATION → USER SERVICE] Error updating User Service (non-blocking)', {
+        userId,
+        error: updateError.message,
+        stack: updateError.stack,
+        note: 'Bank verification succeeded but profile update failed'
+      });
+    }
 
     res.json(successResponse({
       verificationId: verification._id,
