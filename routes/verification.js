@@ -10,6 +10,7 @@ const userService = require('../services/userService');
 const { isValidAadhaarFormat, cleanAadhaarNumber, isValidOtpFormat, maskAadhaar } = require('../utils/validation');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
+const axios = require('axios');
 
 // =====================================================
 // FEATURE FLAGS
@@ -1262,6 +1263,131 @@ router.post('/face/liveness', serviceAuthMiddleware, async (req, res) => {
     res.status(500).json(errorResponse(
       error.message || 'Failed to perform liveness detection',
       'An error occurred while performing liveness detection'
+    ));
+  }
+});
+
+// =====================================================
+// BULK STORAGE ENDPOINT (for admin bulk upload)
+// =====================================================
+
+/**
+ * POST /api/v1/verification/bulk-store
+ * Store masked verification data directly (bypasses OTP flow)
+ * Used for bulk upload of pre-verified users
+ */
+router.post('/bulk-store', serviceAuthMiddleware, async (req, res) => {
+  try {
+    const { userId, type, maskedValue, status, verifiedAt, provider, consent } = req.body;
+
+    // Validation
+    if (!userId) {
+      return res.status(400).json(errorResponse(
+        'Missing required field: userId',
+        'User ID is required'
+      ));
+    }
+
+    if (!type || !['aadhaar', 'pan'].includes(type)) {
+      return res.status(400).json(errorResponse(
+        'Invalid verification type',
+        'Type must be "aadhaar" or "pan"'
+      ));
+    }
+
+    if (!maskedValue) {
+      return res.status(400).json(errorResponse(
+        'Missing required field: maskedValue',
+        'Masked value is required'
+      ));
+    }
+
+    logger.info('📦 [BULK STORE] Storing verification data', {
+      userId,
+      type,
+      maskedValue,
+      provider: provider || 'admin_bulk_upload'
+    });
+
+    // Create verification record
+    const verificationData = {
+      userId,
+      type,
+      status: status || 'verified',
+      provider: provider || 'admin_bulk_upload',
+      verifiedAt: verifiedAt ? new Date(verifiedAt) : new Date(),
+      consent: consent || {
+        given: true,
+        givenAt: new Date(),
+        consentVersion: 'v1.0',
+        consentText: 'Bulk upload - pre-verified user'
+      },
+      auditLog: [{
+        action: 'verified',
+        performedBy: 'system',
+        performedAt: new Date(),
+        metadata: { source: 'bulk_upload' }
+      }]
+    };
+
+    // Set masked value based on type
+    if (type === 'aadhaar') {
+      verificationData.maskedAadhaar = maskedValue;
+    } else if (type === 'pan') {
+      verificationData.maskedPAN = maskedValue;
+    }
+
+    const verification = new Verification(verificationData);
+    await verification.save();
+
+    // Update user profile in user-service
+    try {
+      const userServiceUrl = process.env.USER_SERVICE_URL || 'http://localhost:4002';
+      const updateField = type === 'aadhaar' ? 'isAadhaarVerified' : 'isPANVerified';
+      const updateData = {
+        [updateField]: true,
+        [`${type}VerifiedAt`]: new Date().toISOString()
+      };
+
+      await axios.patch(
+        `${userServiceUrl}/api/v1/profiles/${userId}/verification/${type}`,
+        updateData,
+        {
+          headers: {
+            'X-Service-Auth': process.env.SERVICE_AUTH_TOKEN,
+            'X-Service-Name': 'verification-service',
+            'X-User-Id': userId,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      logger.info(`✅ [BULK STORE] Updated user profile for ${userId}`, { type, updateField });
+    } catch (profileError) {
+      logger.error(`⚠️ [BULK STORE] Failed to update user profile for ${userId}`, {
+        error: profileError.message,
+        type
+      });
+      // Don't fail the request if profile update fails
+    }
+
+    res.json(successResponse({
+      verificationId: verification._id,
+      userId,
+      type,
+      maskedValue,
+      status: verification.status,
+      verifiedAt: verification.verifiedAt
+    }, 'Verification data stored successfully'));
+
+  } catch (error) {
+    logger.error('❌ [BULK STORE] Error storing verification data', {
+      error: error.message,
+      stack: error.stack
+    });
+    res.status(500).json(errorResponse(
+      'Failed to store verification data',
+      error.message
     ));
   }
 });
