@@ -40,7 +40,7 @@ const VerificationSchema = new Schema({
   // ===== PROVIDER INFORMATION =====
   provider: {
     type: String,
-    enum: ['cashfree', 'signzy', 'karza', 'mock', 'internal'],
+    enum: ['cashfree', 'signzy', 'karza', 'mock', 'admin_manual', 'internal'],
     default: 'cashfree',
     index: true
   },
@@ -49,6 +49,36 @@ const VerificationSchema = new Schema({
     type: String,
     index: true
   },
+  
+  // ===== VERIFICATION SOURCE TRACKING (for admin vs self-service) =====
+  verificationSource: {
+    type: String,
+    enum: ['self_service_api', 'admin_manual', 'admin_api', 'system'],
+    default: 'self_service_api',
+    required: true,
+    index: true
+  },
+  
+  // ===== ADMIN VERIFICATION INFO (who verified the document) =====
+  verifiedBy: {
+    userId: String,      // Admin user ID
+    userName: String,    // Admin name
+    role: String         // Admin role
+  },
+  
+  // ===== UPDATE HISTORY (track changes over time) =====
+  updateHistory: [{
+    previousMaskedValue: String,
+    newMaskedValue: String,
+    previousProvider: String,
+    newProvider: String,
+    previousSource: String,
+    newSource: String,
+    updatedAt: Date,
+    updatedBy: String,
+    reason: String,
+    metadata: mongoose.Schema.Types.Mixed
+  }],
   
   // ===== AADHAAR FIELDS (ACTIVE) =====
   maskedAadhaar: String, // Format: XXXX XXXX 1234
@@ -198,8 +228,9 @@ const VerificationSchema = new Schema({
 });
 
 // ===== INDEXES FOR COMMON QUERIES =====
-VerificationSchema.index({ userId: 1, type: 1 }); // User + verification type
+VerificationSchema.index({ userId: 1, type: 1 }, { unique: true }); // UNIQUE: Only one verification per user per type
 VerificationSchema.index({ userId: 1, status: 1 }); // User + status
+VerificationSchema.index({ userId: 1, verificationSource: 1 }); // User + source
 VerificationSchema.index({ transactionId: 1 });
 VerificationSchema.index({ refId: 1 });
 VerificationSchema.index({ createdAt: -1 });

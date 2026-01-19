@@ -10,6 +10,7 @@ const userService = require('../services/userService');
 const { isValidAadhaarFormat, cleanAadhaarNumber, isValidOtpFormat, maskAadhaar } = require('../utils/validation');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
+const axios = require('axios');
 
 // =====================================================
 // FEATURE FLAGS
@@ -1351,6 +1352,288 @@ router.post('/face/liveness', serviceAuthMiddleware, async (req, res) => {
     res.status(500).json(errorResponse(
       error.message || 'Failed to perform liveness detection',
       'An error occurred while performing liveness detection'
+    ));
+  }
+});
+
+// =====================================================
+// BULK STORAGE ENDPOINT (for admin bulk upload)
+// =====================================================
+
+/**
+ * POST /api/v1/verification/bulk-store
+ * Store masked verification data directly (bypasses OTP flow)
+ * Used for bulk upload of pre-verified users
+ * 
+ * ✅ ENHANCED: Now checks for existing verification and updates with history tracking
+ */
+router.post('/bulk-store', serviceAuthMiddleware, async (req, res) => {
+  try {
+    const { 
+      userId, 
+      type, 
+      maskedValue, 
+      status, 
+      verifiedAt, 
+      provider, 
+      consent,
+      verificationSource,  // NEW: Track source (admin_manual, admin_bulk, etc.)
+      verifiedBy          // NEW: Admin info { userId, userName, role }
+    } = req.body;
+
+    // Validation
+    if (!userId) {
+      return res.status(400).json(errorResponse(
+        'Missing required field: userId',
+        'User ID is required'
+      ));
+    }
+
+    if (!type || !['aadhaar', 'pan'].includes(type)) {
+      return res.status(400).json(errorResponse(
+        'Invalid verification type',
+        'Type must be "aadhaar" or "pan"'
+      ));
+    }
+
+    if (!maskedValue) {
+      return res.status(400).json(errorResponse(
+        'Missing required field: maskedValue',
+        'Masked value is required'
+      ));
+    }
+
+    logger.info('📦 [BULK STORE] Processing verification data', {
+      userId,
+      type,
+      maskedValue,
+      provider: provider || 'admin_manual',
+      verificationSource: verificationSource || 'admin_manual',
+      verifiedBy: verifiedBy?.userId || 'system'
+    });
+
+    // ✅ Check if verification already exists
+    let verification = await Verification.findOne({ userId, type });
+    let isUpdate = false;
+
+    if (verification) {
+      // ===== VERIFICATION EXISTS - UPDATE WITH HISTORY =====
+      isUpdate = true;
+      
+      logger.info('📝 [BULK STORE] Found existing verification, updating with history', {
+        userId,
+        type,
+        existingVerificationId: verification._id,
+        previousSource: verification.verificationSource,
+        newSource: verificationSource || 'admin_manual'
+      });
+
+      // Get previous masked value
+      const previousMaskedValue = type === 'aadhaar' 
+        ? verification.maskedAadhaar 
+        : verification.maskedPAN;
+
+      // Store previous values in history
+      const historyEntry = {
+        previousMaskedValue: previousMaskedValue,
+        newMaskedValue: maskedValue,
+        previousProvider: verification.provider,
+        newProvider: provider || 'admin_manual',
+        previousSource: verification.verificationSource || 'self_service_api',
+        newSource: verificationSource || 'admin_manual',
+        updatedAt: new Date(),
+        updatedBy: verifiedBy?.userId || 'system',
+        reason: `Updated by ${verificationSource || 'admin_manual'} - previous verification was ${verification.verificationSource || 'self_service_api'}`,
+        metadata: {
+          previousStatus: verification.status,
+          previousVerifiedAt: verification.verifiedAt,
+          updatedByName: verifiedBy?.userName,
+          updatedByRole: verifiedBy?.role
+        }
+      };
+
+      // Add to history (initialize if doesn't exist)
+      if (!verification.updateHistory) {
+        verification.updateHistory = [];
+      }
+      verification.updateHistory.push(historyEntry);
+
+      // Update current values
+      verification.status = status || 'verified';
+      verification.provider = provider || 'admin_manual';
+      verification.verificationSource = verificationSource || 'admin_manual';
+      verification.verifiedAt = verifiedAt ? new Date(verifiedAt) : new Date();
+      verification.verifiedBy = verifiedBy;
+      
+      // Update masked value based on type
+      if (type === 'aadhaar') {
+        verification.maskedAadhaar = maskedValue;
+      } else if (type === 'pan') {
+        verification.maskedPAN = maskedValue;
+      }
+
+      // Add audit log entry
+      verification.auditLog.push({
+        action: 'updated_by_admin',
+        performedBy: verifiedBy?.userId || 'system',
+        performedAt: new Date(),
+        metadata: { 
+          source: 'bulk_store',
+          previousSource: historyEntry.previousSource,
+          newSource: historyEntry.newSource,
+          reason: 'Admin updated verification',
+          verifiedByName: verifiedBy?.userName,
+          verifiedByRole: verifiedBy?.role
+        }
+      });
+
+      await verification.save();
+
+      logger.info('✅ [BULK STORE] Updated existing verification with history', {
+        userId,
+        type,
+        verificationId: verification._id,
+        previousSource: historyEntry.previousSource,
+        newSource: historyEntry.newSource,
+        historyCount: verification.updateHistory.length
+      });
+
+    } else {
+      // ===== NO EXISTING VERIFICATION - CREATE NEW =====
+      
+      logger.info('📝 [BULK STORE] Creating new verification record', {
+        userId,
+        type,
+        verificationSource: verificationSource || 'admin_manual'
+      });
+
+      // Create verification record
+      const verificationData = {
+        userId,
+        type,
+        status: status || 'verified',
+        provider: provider || 'admin_manual',
+        verificationSource: verificationSource || 'admin_manual',
+        verifiedBy: verifiedBy,
+        verifiedAt: verifiedAt ? new Date(verifiedAt) : new Date(),
+        consent: consent || {
+          given: true,
+          givenAt: new Date(),
+          consentVersion: 'v1.0',
+          consentText: `Document verified by ${verificationSource || 'admin'} - ${type} verification`
+        },
+        auditLog: [{
+          action: 'verified',
+          performedBy: verifiedBy?.userId || 'system',
+          performedAt: new Date(),
+          metadata: { 
+            source: 'bulk_store',
+            verificationSource: verificationSource || 'admin_manual',
+            verifiedByName: verifiedBy?.userName,
+            verifiedByRole: verifiedBy?.role
+          }
+        }],
+        updateHistory: [] // Initialize empty history array
+      };
+
+      // Set masked value based on type
+      if (type === 'aadhaar') {
+        verificationData.maskedAadhaar = maskedValue;
+      } else if (type === 'pan') {
+        verificationData.maskedPAN = maskedValue;
+      }
+
+      verification = new Verification(verificationData);
+      await verification.save();
+
+      logger.info('✅ [BULK STORE] Created new verification', {
+        userId,
+        type,
+        verificationId: verification._id,
+        source: verification.verificationSource
+      });
+    }
+
+    // Update user profile in user-service
+    try {
+      const userServiceUrl = process.env.USER_SERVICE_URL || 'http://localhost:4002';
+      const updateField = type === 'aadhaar' ? 'isAadhaarVerified' : 'isPANVerified';
+      const updateData = {
+        [updateField]: true,
+        [`${type}VerifiedAt`]: new Date().toISOString()
+      };
+
+      await axios.patch(
+        `${userServiceUrl}/api/v1/profiles/${userId}/verification/${type}`,
+        updateData,
+        {
+          headers: {
+            'X-Service-Auth': process.env.SERVICE_AUTH_TOKEN,
+            'X-Service-Name': 'verification-service',
+            'X-User-Id': userId,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      logger.info(`✅ [BULK STORE] Updated user profile for ${userId}`, { type, updateField, isUpdate });
+    } catch (profileError) {
+      logger.error(`⚠️ [BULK STORE] Failed to update user profile for ${userId}`, {
+        error: profileError.message,
+        type
+      });
+      // Don't fail the request if profile update fails
+    }
+
+    // Build response with update information
+    const responseData = {
+      verificationId: verification._id,
+      userId,
+      type,
+      maskedValue,
+      status: verification.status,
+      verifiedAt: verification.verifiedAt,
+      source: verification.verificationSource,
+      isUpdate: isUpdate
+    };
+
+    // Add previous info if this was an update
+    if (isUpdate && verification.updateHistory.length > 0) {
+      const latestHistory = verification.updateHistory[verification.updateHistory.length - 1];
+      responseData.previousSource = latestHistory.previousSource;
+      responseData.previousMaskedValue = latestHistory.previousMaskedValue;
+      responseData.historyCount = verification.updateHistory.length;
+    }
+
+    const message = isUpdate 
+      ? `Verification data updated successfully (previous: ${responseData.previousSource})`
+      : 'Verification data stored successfully';
+
+    res.json(successResponse(responseData, message));
+
+  } catch (error) {
+    // Handle duplicate key error (shouldn't happen with findOne + update, but just in case)
+    if (error.code === 11000) {
+      logger.error('❌ [BULK STORE] Duplicate verification detected', {
+        userId: req.body.userId,
+        type: req.body.type,
+        error: error.message
+      });
+      return res.status(409).json(errorResponse(
+        'Verification already exists for this user and type',
+        'A verification record already exists. This should not happen - please contact support.'
+      ));
+    }
+
+    logger.error('❌ [BULK STORE] Error storing verification data', {
+      error: error.message,
+      stack: error.stack,
+      userId: req.body.userId,
+      type: req.body.type
+    });
+    res.status(500).json(errorResponse(
+      'Failed to store verification data',
+      error.message
     ));
   }
 });
