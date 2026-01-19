@@ -9,13 +9,16 @@ const mongoose = require('mongoose');
 const { validateEnv, getCorsConfig } = require('./config/env');
 const logger = require('./config/logger');
 const verificationRouter = require('./routes/verification');
+const emailVerificationRouter = require('./routes/emailVerification');
 const cashfreeService = require('./services/cashfreeService');
+const { EmailServiceClient } = require('./services/emailServiceClient');
 
 // Validate environment variables
 const env = validateEnv();
 
-// Initialize Cashfree service
+// Initialize services
 cashfreeService.initialize(env);
+EmailServiceClient.initialize();
 
 const app = express();
 
@@ -115,6 +118,7 @@ app.get('/health', async (req, res) => {
 
 // API routes
 app.use('/api/v1/verification', verificationRouter);
+app.use('/api/v1/verification', emailVerificationRouter);
 
 // 404 handler for API routes
 app.use('/api', (req, res) => {

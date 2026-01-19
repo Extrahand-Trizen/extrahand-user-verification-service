@@ -15,6 +15,7 @@ const VerificationSchema = new Schema({
     enum: [
       // ACTIVE NOW
       'aadhaar',
+      'email',
       
       // READY FOR FUTURE (feature flags)
       'pan',
@@ -39,7 +40,7 @@ const VerificationSchema = new Schema({
   // ===== PROVIDER INFORMATION =====
   provider: {
     type: String,
-    enum: ['cashfree', 'signzy', 'karza', 'mock'],
+    enum: ['cashfree', 'signzy', 'karza', 'mock', 'internal'],
     default: 'cashfree',
     index: true
   },
@@ -51,6 +52,9 @@ const VerificationSchema = new Schema({
   
   // ===== AADHAAR FIELDS (ACTIVE) =====
   maskedAadhaar: String, // Format: XXXX XXXX 1234
+  
+  // ===== EMAIL FIELDS =====
+  maskedEmail: String, // Format: j***@example.com
   
   // ===== FUTURE FIELDS (READY BUT UNUSED NOW) =====
   maskedPAN: String, // Format: ABXXX1234F
@@ -80,6 +84,7 @@ const VerificationSchema = new Schema({
   },
   otpSentAt: Date,
   otpExpiresAt: Date, // OTP expiration (typically 10 minutes)
+  otpHash: String, // Hashed OTP for secure verification
   otpVerified: {
     type: Boolean,
     default: false
@@ -88,7 +93,7 @@ const VerificationSchema = new Schema({
   otpAttempts: {
     type: Number,
     default: 0,
-    max: 3
+    max: 5
   },
   
   // ===== FACE VERIFICATION FIELDS (FUTURE) =====
@@ -171,6 +176,7 @@ const VerificationSchema = new Schema({
   
   // ===== METADATA =====
   metadata: {
+    email: String, // Store actual email for email verification
     ipAddress: String,
     userAgent: String,
     environment: String, // sandbox or production

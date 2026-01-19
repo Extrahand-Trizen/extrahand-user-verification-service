@@ -437,6 +437,18 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter 
             userId,
             responseData: userServiceUpdate.data
           });
+
+          // Send verification approved email (non-blocking)
+          const { EmailServiceClient } = require('../services/emailServiceClient');
+          const userProfile = userServiceUpdate.data?.profile || userServiceUpdate.data;
+          if (userProfile?.email) {
+            EmailServiceClient.sendVerificationApproved(
+              userProfile.email,
+              userProfile.name || 'User',
+              'Aadhaar',
+              'Your identity has been successfully verified'
+            ).catch(err => logger.error('Failed to send verification approved email', { error: err.message }));
+          }
         } else {
           logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to update User Service, but verification succeeded', {
             userId,
@@ -874,6 +886,17 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
       verificationId: verification._id,
       status: verification.status 
     });
+
+    // Send PAN verification email (non-blocking)
+    if (result.success) {
+      const { EmailServiceClient } = require('../services/emailServiceClient');
+      // Note: Would need to fetch user email from user-service
+      logger.info('Email trigger: pan_verification_approved', {
+        userId,
+        status: verification.status,
+        maskedPAN: verification.maskedPAN,
+      });
+    }
 
     res.json(successResponse({
       verificationId: verification._id,
