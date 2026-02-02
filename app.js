@@ -9,13 +9,14 @@ const mongoose = require('mongoose');
 const { validateEnv, getCorsConfig } = require('./config/env');
 const logger = require('./config/logger');
 const verificationRouter = require('./routes/verification');
-const cashfreeService = require('./services/cashfreeService');
+const webhooksRouter = require('./routes/webhooks');
+const digilockerService = require('./services/digilockerService');
 
 // Validate environment variables
 const env = validateEnv();
 
-// Initialize Cashfree service
-cashfreeService.initialize(env);
+// Initialize DigiLocker service (Aadhaar verification via Cashfree)
+digilockerService.initialize(env);
 
 const app = express();
 
@@ -55,6 +56,11 @@ app.options('*', cors(corsOptions));
 
 // Body parsing and compression
 app.use(compression());
+
+// Webhook route MUST use raw body for signature verification (before express.json)
+app.use('/api/v1/webhooks/cashfree', express.raw({ type: 'application/json' }));
+app.use('/api/v1/webhooks/cashfree', webhooksRouter);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -96,10 +102,10 @@ app.get('/health', async (req, res) => {
       healthCheck.mongodb = 'not_configured';
     }
 
-    // Check Cashfree service
-    healthCheck.cashfree = {
+    // Check DigiLocker service (Cashfree DigiLocker API)
+    healthCheck.digilocker = {
       environment: env.CASHFREE_ENV,
-      initialized: cashfreeService.initialized
+      initialized: digilockerService.initialized
     };
 
     res.status(healthCheck.status === 'ok' ? 200 : 503).json(healthCheck);

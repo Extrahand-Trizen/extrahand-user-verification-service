@@ -163,14 +163,27 @@ class CashfreeProvider extends BaseVerificationProvider {
           logger.error('❌ [Cashfree] OTP generation error', {
             error: error.message,
             response: error.response?.data,
-            status: error.response?.status
+            status: error.response?.status,
+            environment: this.environment
           });
 
-          // Extract error message from response
-          const errorMessage = error.response?.data?.message 
-            || error.response?.data?.error 
-            || error.message 
-            || 'Failed to generate OTP';
+          // ✅ Handle specific Cashfree environment mismatch error
+          const errorData = error.response?.data || {};
+          const errorMessage = errorData.message || errorData.error || error.message || 'Failed to generate OTP';
+          
+          if (errorMessage.toLowerCase().includes('client secret belongs to test environment') || 
+              errorMessage.toLowerCase().includes('belongs to test environment')) {
+            const helpfulMessage = `Cashfree environment mismatch: Your CASHFREE_ENV is set to '${this.environment}', but the client secret is for ${this.environment === 'production' ? 'sandbox/test' : 'production'} environment. ` +
+              `Please either: 1) Set CASHFREE_ENV=sandbox if using sandbox credentials, or 2) Use production credentials if CASHFREE_ENV=production.`;
+            
+            logger.error('❌ [Cashfree] Environment mismatch detected', {
+              configuredEnv: this.environment,
+              errorMessage,
+              suggestion: helpfulMessage
+            });
+            
+            throw new Error(helpfulMessage);
+          }
 
           // Re-throw with original axios error for proper categorization
           if (error.response) {

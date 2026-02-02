@@ -1,13 +1,13 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const Verification = require('../models/Verification');
-const cashfreeService = require('../services/cashfreeService');
+const KycSession = require('../models/KycSession');
 const { getVerificationProvider } = require('../services/providerFactory');
+const digilockerService = require('../services/digilockerService');
 const { serviceAuthMiddleware } = require('../middleware/auth');
 const userService = require('../services/userService');
-// Rate limiters disabled temporarily
-// const { otpGenerationLimiter, otpResendLimiter, otpVerificationLimiter } = require('../middleware/rateLimiting');
-const { isValidAadhaarFormat, cleanAadhaarNumber, isValidOtpFormat, maskAadhaar } = require('../utils/validation');
+const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar } = require('../utils/validation');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
 const axios = require('axios');
@@ -43,17 +43,16 @@ router.get('/features', (req, res) => {
 });
 
 // =====================================================
-// AADHAAR VERIFICATION ROUTES (ACTIVE)
+// AADHAAR VERIFICATION (DigiLocker)
 // =====================================================
 
 /**
- * POST /api/v1/verification/aadhaar/initiate
- * Initiate Aadhaar KYC - Generate OTP
- * Rate limited: 3 requests per user per hour
+ * POST /api/v1/verification/aadhaar/digilocker/initiate
+ * Step 1+2: Verify Account + Create URL
+ * Returns DigiLocker URL for user to complete verification
  */
-router.post('/aadhaar/initiate', serviceAuthMiddleware, /* otpGenerationLimiter - DISABLED temporarily */ async (req, res) => {
+router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, res) => {
   try {
-    // Feature flag check
     if (!FEATURES.AADHAAR) {
       return res.status(503).json(errorResponse(
         'Aadhaar verification is temporarily disabled',
@@ -63,20 +62,16 @@ router.post('/aadhaar/initiate', serviceAuthMiddleware, /* otpGenerationLimiter 
     }
 
     const userId = req.headers['x-user-id'] || req.body.userId;
-    const { aadhaarNumber, consentGiven, consent } = req.body;
+    const { mobileNumber, aadhaarNumber, consentGiven } = req.body;
 
-    // Validation
     if (!userId) {
-      return res.status(400).json(errorResponse(
-        'Missing required field: userId',
-        'User ID is required'
-      ));
+      return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
     }
 
-    if (!aadhaarNumber) {
+    if (!mobileNumber && !aadhaarNumber) {
       return res.status(400).json(errorResponse(
-        'Missing required field: aadhaarNumber',
-        'Aadhaar number is required'
+        'Either mobileNumber or aadhaarNumber is required',
+        'Please provide mobile number or Aadhaar number'
       ));
     }
 
@@ -87,529 +82,336 @@ router.post('/aadhaar/initiate', serviceAuthMiddleware, /* otpGenerationLimiter 
       ));
     }
 
-    // Clean and validate Aadhaar number
-    const cleanedAadhaar = cleanAadhaarNumber(aadhaarNumber);
-    if (!isValidAadhaarFormat(cleanedAadhaar)) {
-      return res.status(400).json(errorResponse(
-        'Invalid Aadhaar number format',
-        'Aadhaar number must be exactly 12 digits'
+    // Validate Aadhaar format if provided
+    if (aadhaarNumber) {
+      const cleaned = cleanAadhaarNumber(aadhaarNumber);
+      if (!isValidAadhaarFormat(cleaned)) {
+        return res.status(400).json(errorResponse(
+          'Invalid Aadhaar number format',
+          'Aadhaar number must be exactly 12 digits'
+        ));
+      }
+    }
+
+    const redirectUrl = process.env.DIGILOCKER_REDIRECT_URL;
+    if (!redirectUrl) {
+      return res.status(500).json(errorResponse(
+        'DIGILOCKER_REDIRECT_URL not configured',
+        'DigiLocker redirect URL is not configured. Please contact support.'
       ));
     }
 
-    logger.info('🔄 Initiating Aadhaar verification', {
-      userId,
-      maskedAadhaar: maskAadhaar(cleanedAadhaar),
-      ip: getClientIp(req)
-    });
-
-    // ✨ FIRST: Check User Service to see if user is already verified
+    // Check if already verified
     try {
       const userProfile = await userService.getUserProfile(userId);
-      // User Service returns { success: true, profile: { ... } }
-      // userProfile.data = { success: true, profile: { ... } }
       const profile = userProfile.data?.profile || userProfile.data;
-      
-      logger.info('🔍 Checking User Service for verification status', {
-        userId,
-        hasData: !!userProfile.data,
-        hasProfile: !!profile,
-        isAadhaarVerified: profile?.isAadhaarVerified
-      });
-      
       if (userProfile.success && profile?.isAadhaarVerified === true) {
-        logger.info('✅ User already verified in User Service', { 
-          userId,
-          verifiedAt: profile.aadhaarVerifiedAt
-        });
-        return res.status(200).json({
-          success: true,
-          message: 'Aadhaar is already verified',
-          data: {
-            alreadyVerified: true,
-            status: 'verified',
-            maskedAadhaar: profile.maskedAadhaar || maskAadhaar(cleanedAadhaar),
-            verifiedAt: profile.aadhaarVerifiedAt
-          },
-          timestamp: new Date().toISOString()
-        });
-      }
-    } catch (userServiceError) {
-      // Log but don't fail - continue with verification service check
-      logger.warn('⚠️ Could not check User Service, continuing with verification service check', {
-        userId,
-        error: userServiceError.message,
-        stack: userServiceError.stack
-      });
-    }
-
-    // Check if verification already exists and is verified in verification service
-    let verification = await Verification.findByUserId(userId);
-    
-    if (verification && verification.status === 'verified') {
-      logger.warn('⚠️ User already verified in verification service', { userId });
-      // Return 200 with already verified status instead of 400 error
-      return res.status(200).json({
-        success: true,
-        message: 'Aadhaar is already verified',
-        data: {
+        return res.status(200).json(successResponse({
           alreadyVerified: true,
           status: 'verified',
-          maskedAadhaar: verification.maskedAadhaar || maskAadhaar(cleanedAadhaar),
-          verifiedAt: verification.verifiedAt
-        },
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // Generate OTP via Cashfree
-    const otpResult = await cashfreeService.generateAadhaarOTP(cleanedAadhaar);
-
-    if (!otpResult.success) {
-      return res.status(400).json(errorResponse(
-        otpResult.message || 'Failed to generate OTP',
-        'Could not initiate Aadhaar verification'
-      ));
-    }
-
-    // Save verification record
-    const now = new Date();
-    const otpExpiresAt = new Date(now.getTime() + 10 * 60 * 1000); // OTP expires in 10 minutes
-    
-    // Enhanced consent object (backward compatible)
-    const consentData = consent || {
-      given: consentGiven === true,
-      text: 'User agreed to Aadhaar verification',
-      version: 'v1.0'
-    };
-    
-    const verificationData = {
-      userId,
-      type: 'aadhaar',
-      status: 'otp_sent',
-      provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-      transactionId: otpResult.refId,
-      refId: otpResult.refId,
-      maskedAadhaar: maskAadhaar(cleanedAadhaar),
-      otpSent: true,
-      otpSentAt: now,
-      otpExpiresAt: otpExpiresAt,
-      // Enhanced consent tracking
-      consent: {
-        given: true,
-        givenAt: now,
-        ipAddress: getClientIp(req),
-        userAgent: req.get('user-agent') || 'unknown',
-        consentVersion: consentData.version || 'v1.0',
-        consentText: consentData.text || 'User agreed to Aadhaar verification'
-      },
-      // Audit log
-      auditLog: [{
-        action: 'initiated',
-        performedBy: userId,
-        performedAt: now,
-        ipAddress: getClientIp(req),
-        metadata: {
-          provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-          environment: process.env.CASHFREE_ENV || 'sandbox'
-        }
-      }],
-      initiatedAt: now,
-      metadata: {
-        ipAddress: getClientIp(req),
-        userAgent: req.get('user-agent') || 'unknown',
-        environment: process.env.CASHFREE_ENV || 'sandbox'
+          maskedAadhaar: profile.maskedAadhaar,
+          verifiedAt: profile.aadhaarVerifiedAt
+        }, 'Aadhaar is already verified'));
       }
-    };
-
-    if (verification) {
-      // Update existing verification
-      Object.assign(verification, verificationData);
-      await verification.save();
-    } else {
-      // Create new verification
-      verification = await Verification.create(verificationData);
+    } catch (e) {
+      logger.warn('Could not check User Service', { userId, error: e.message });
     }
 
-    logger.info('✅ Aadhaar verification initiated', {
-      userId,
-      refId: otpResult.refId,
-      status: 'otp_sent'
+    const aadhaarVerification = await Verification.findByUserIdAndType(userId, 'aadhaar');
+    if (aadhaarVerification?.status === 'verified') {
+      return res.status(200).json(successResponse({
+        alreadyVerified: true,
+        status: 'verified',
+        maskedAadhaar: aadhaarVerification.maskedAadhaar,
+        verifiedAt: aadhaarVerification.verifiedAt
+      }, 'Aadhaar is already verified'));
+    }
+
+    const verificationId = `eh_${crypto.randomUUID().replace(/-/g, '')}`;
+    const now = new Date();
+    const urlExpiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+
+    // Step 1: Verify Account
+    const verifyResult = await digilockerService.verifyAccount(verificationId, {
+      mobileNumber: mobileNumber || undefined,
+      aadhaarNumber: aadhaarNumber ? cleanAadhaarNumber(aadhaarNumber) : undefined
     });
 
-    const response = successResponse({
-      transactionId: otpResult.refId,
-      refId: otpResult.refId,
-      maskedAadhaar: verificationData.maskedAadhaar
-    }, 'OTP sent successfully');
+    const userFlow = verifyResult.status === 'ACCOUNT_EXISTS' ? 'signin' : 'signup';
 
-    // In sandbox, include test OTP for testing convenience
-    if (cashfreeService.isSandbox()) {
-      response.data.testOtp = cashfreeService.getTestOtp();
-      response.data.message = 'OTP sent successfully (Sandbox mode - use test OTP for testing)';
-    }
+    // Step 2: Create URL
+    const createResult = await digilockerService.createUrl(
+      verificationId,
+      ['AADHAAR'],
+      redirectUrl,
+      userFlow
+    );
 
-    res.json(response);
+    // Save KycSession
+    await KycSession.create({
+      verification_id: verificationId,
+      userId,
+      sessionType: 'digilocker',
+      status: 'in_progress',
+      digilockerStatus: verifyResult.status,
+      referenceId: verifyResult.reference_id || createResult.reference_id,
+      digilockerId: verifyResult.digilocker_id,
+      userFlow,
+      digilockerUrl: createResult.url,
+      documentRequested: ['AADHAAR'],
+      redirectUrl,
+      urlExpiresAt,
+      documentConsent: null,
+      documentConsentValidity: null,
+      userDetails: {}
+    });
+
+    logger.info('✅ DigiLocker session initiated', { userId, verificationId });
+
+    res.json(successResponse({
+      verification_id: verificationId,
+      url: createResult.url,
+      status: 'PENDING',
+      urlExpiresAt,
+      message: 'Redirect user to the URL to complete verification'
+    }, 'DigiLocker URL created'));
   } catch (error) {
-    logger.error('❌ Error initiating Aadhaar KYC', {
+    logger.error('❌ DigiLocker initiate error', {
       error: error.message,
       stack: error.stack,
-      userId: req.headers['x-user-id'] || req.body.userId
+      userId: req.headers['x-user-id'] || req.body?.userId
     });
 
-    res.status(500).json(errorResponse(
-      error.message || 'Failed to initiate Aadhaar verification',
+    const status = error.response?.status || 500;
+    const message = error.response?.data?.message || error.message || 'Failed to initiate DigiLocker verification';
+
+    res.status(status >= 400 ? status : 500).json(errorResponse(
+      message,
       'An error occurred while initiating verification'
     ));
   }
 });
 
 /**
- * POST /api/v1/verification/aadhaar/verify
- * Verify Aadhaar OTP
- * Rate limited: 10 attempts per user per 15 minutes
+ * GET /api/v1/verification/aadhaar/digilocker/status
+ * Step 4: Get verification status (for polling)
+ * Query: verification_id
  */
-router.post('/aadhaar/verify', serviceAuthMiddleware, /* otpVerificationLimiter - DISABLED temporarily */ async (req, res) => {
+router.get('/aadhaar/digilocker/status', serviceAuthMiddleware, async (req, res) => {
   try {
-    const userId = req.headers['x-user-id'] || req.body.userId;
-    const { transactionId, refId, otp } = req.body;
+    const verificationId = req.query.verification_id;
+    const userId = req.headers['x-user-id'];
 
-    // Validation
-    if (!userId) {
+    if (!verificationId) {
       return res.status(400).json(errorResponse(
-        'Missing required field: userId',
-        'User ID is required'
+        'Missing verification_id',
+        'verification_id query parameter is required'
       ));
     }
 
-    const verificationRefId = refId || transactionId;
-    if (!verificationRefId) {
-      return res.status(400).json(errorResponse(
-        'Missing required field: refId or transactionId',
-        'Reference ID is required'
-      ));
-    }
-
-    if (!otp) {
-      return res.status(400).json(errorResponse(
-        'Missing required field: otp',
-        'OTP is required'
-      ));
-    }
-
-    if (!isValidOtpFormat(otp)) {
-      return res.status(400).json(errorResponse(
-        'Invalid OTP format',
-        'OTP must be 6 digits'
-      ));
-    }
-
-    logger.info('🔄 Verifying Aadhaar OTP', {
-      userId,
-      refId: verificationRefId,
-      ip: getClientIp(req)
-    });
-
-    // Get verification record
-    const verification = await Verification.findOne({ 
-      userId, 
-      $or: [
-        { refId: verificationRefId },
-        { transactionId: verificationRefId }
-      ]
-    });
-
-    if (!verification) {
-      logger.warn('⚠️ Verification session not found', { userId, refId: verificationRefId });
+    const session = await KycSession.findByVerificationId(verificationId);
+    if (!session) {
       return res.status(404).json(errorResponse(
-        'Verification session not found',
-        'No active verification session found for this user'
+        'Session not found',
+        'No DigiLocker session found for this verification ID'
       ));
     }
 
-    if (verification.status !== 'otp_sent') {
-      return res.status(400).json(errorResponse(
-        'OTP not sent for this verification',
-        `Verification status is: ${verification.status}`
+    if (userId && session.userId !== userId) {
+      return res.status(403).json(errorResponse(
+        'Forbidden',
+        'This session does not belong to you'
       ));
     }
 
-    // Check if OTP has expired
-    if (verification.isOtpExpired()) {
-      logger.warn('⚠️ OTP has expired', { userId, refId: verificationRefId });
-      return res.status(400).json(errorResponse(
-        'OTP has expired',
-        'The OTP has expired. Please request a new one.',
-        'OTP_EXPIRED'
-      ));
-    }
+    const statusResult = await digilockerService.getStatus(verificationId);
 
-    // Check OTP attempts
-    if (verification.hasExceededAttempts()) {
-      verification.status = 'failed';
-      verification.failedAt = new Date();
-      verification.failureReason = 'Maximum OTP attempts exceeded';
-      await verification.save();
+    // Update session with latest status
+    session.status = statusResult.status === 'AUTHENTICATED' ? 'in_progress' : session.status;
+    session.documentConsent = statusResult.document_consent || session.documentConsent;
+    session.documentConsentValidity = statusResult.document_consent_validity
+      ? new Date(statusResult.document_consent_validity)
+      : session.documentConsentValidity;
+    session.userDetails = statusResult.user_details || session.userDetails || {};
+    await session.save();
 
-      logger.warn('⚠️ Maximum OTP attempts exceeded', { userId, refId: verificationRefId });
-      return res.status(400).json(errorResponse(
-        'Maximum OTP attempts exceeded',
-        'You have exceeded the maximum number of OTP verification attempts'
-      ));
-    }
-
-    // Verify OTP via Cashfree
-    const verifyResult = await cashfreeService.verifyAadhaarOTP(verificationRefId, otp);
-
-    // Update verification record
-    if (verifyResult.success) {
-      verification.status = 'verified';
-      verification.otpVerified = true;
-      verification.otpVerifiedAt = new Date();
-      verification.verifiedAt = new Date();
-      verification.verifiedData = verifyResult.verifiedData;
-      // Always update maskedAadhaar if provided, otherwise keep existing value
-      if (verifyResult.maskedAadhaar) {
-        verification.maskedAadhaar = verifyResult.maskedAadhaar;
-      }
-      verification.otpAttempts = 0; // Reset attempts on success
-    } else {
-      verification.otpAttempts = (verification.otpAttempts || 0) + 1;
-      verification.status = verifyResult.message.includes('OTP') ? 'otp_sent' : 'failed';
-      verification.failureReason = verifyResult.message;
-      
-      if (verification.otpAttempts >= 3) {
-        verification.status = 'failed';
-        verification.failedAt = new Date();
-      }
-    }
-
-    // ✨ LOG: Before saving verification to MongoDB
-    logger.info('💾 [MONGODB] Saving verification record to MongoDB', {
-      userId,
-      refId: verificationRefId,
-      status: verification.status,
-      verifiedAt: verification.verifiedAt,
-      verificationId: verification._id?.toString()
-    });
-    
-    await verification.save();
-    
-    // ✨ LOG: After saving verification to MongoDB
-    logger.info('✅ [MONGODB] Verification record saved to MongoDB', {
-      userId,
-      refId: verificationRefId,
-      status: verification.status,
-      verificationId: verification._id?.toString(),
-      verifiedAt: verification.verifiedAt
-    });
-
-    if (verifyResult.success) {
-      logger.info('✅ Aadhaar OTP verified successfully', {
-        userId,
-        refId: verificationRefId,
-        status: 'verified'
-      });
-
-      // ✨ Update User Service with verification status
-      logger.info('📞 [VERIFICATION → USER SERVICE] Calling User Service to update Aadhaar verification status', {
-        userId,
-        maskedAadhaar: verifyResult.maskedAadhaar,
-        verifiedData: {
-          name: verifyResult.verifiedData.name,
-          gender: verifyResult.verifiedData.gender,
-          yearOfBirth: verifyResult.verifiedData.yearOfBirth
-        }
-      });
-      
-      try {
-        const userServiceUpdate = await userService.updateAadhaarVerificationStatus(userId, {
-          isAadhaarVerified: true,
-          aadhaarVerifiedAt: new Date().toISOString(),
-          maskedAadhaar: verifyResult.maskedAadhaar,
-          verifiedData: {
-            name: verifyResult.verifiedData.name,
-            gender: verifyResult.verifiedData.gender,
-            yearOfBirth: verifyResult.verifiedData.yearOfBirth
-          }
-        });
-
-        if (userServiceUpdate.success) {
-          logger.info('✅ [VERIFICATION → USER SERVICE] User Service updated with Aadhaar verification', { 
-            userId,
-            responseData: userServiceUpdate.data
-          });
-        } else {
-          logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to update User Service, but verification succeeded', {
-            userId,
-            error: userServiceUpdate.error,
-            status: userServiceUpdate.status
-          });
-        }
-      } catch (updateError) {
-        // Log but don't fail the verification response
-        logger.error('❌ [VERIFICATION → USER SERVICE] Error updating User Service (non-blocking)', {
-          userId,
-          error: updateError.message,
-          stack: updateError.stack,
-          responseStatus: updateError.response?.status,
-          responseData: updateError.response?.data
-        });
-      }
-
-      res.json(successResponse({
-        status: 'verified',
-        maskedAadhaar: verifyResult.maskedAadhaar,
-        verifiedData: {
-          name: verifyResult.verifiedData.name,
-          gender: verifyResult.verifiedData.gender,
-          yearOfBirth: verifyResult.verifiedData.yearOfBirth
-        }
-      }, 'Aadhaar verification successful'));
-    } else {
-      logger.warn('⚠️ Aadhaar OTP verification failed', {
-        userId,
-        refId: verificationRefId,
-        attempts: verification.otpAttempts,
-        message: verifyResult.message
-      });
-
-      res.status(400).json(errorResponse(
-        verifyResult.message || 'OTP verification failed',
-        `Verification failed. ${3 - verification.otpAttempts} attempts remaining.`
-      ));
-    }
+    res.json(successResponse({
+      verification_id: verificationId,
+      status: statusResult.status,
+      document_consent: statusResult.document_consent,
+      document_consent_validity: statusResult.document_consent_validity,
+      user_details: statusResult.user_details,
+      ready_for_complete: statusResult.status === 'AUTHENTICATED' && statusResult.user_details?.eaadhaar === 'Y'
+    }, 'Status retrieved'));
   } catch (error) {
-    logger.error('❌ Error verifying Aadhaar OTP', {
+    logger.error('❌ DigiLocker status error', {
       error: error.message,
-      stack: error.stack,
-      userId: req.headers['x-user-id'] || req.body.userId
+      verificationId: req.query.verification_id
     });
 
     res.status(500).json(errorResponse(
-      error.message || 'Failed to verify OTP',
-      'An error occurred while verifying OTP'
+      error.response?.data?.message || error.message || 'Failed to get status',
+      'An error occurred while fetching status'
     ));
   }
 });
 
 /**
- * POST /api/v1/verification/aadhaar/resend
- * Resend OTP for Aadhaar verification
- * Rate limited: 5 requests per user per hour
+ * POST /api/v1/verification/aadhaar/digilocker/complete
+ * Step 5: Get Document + update Verification + User Service
  */
-router.post('/aadhaar/resend', serviceAuthMiddleware, /* otpResendLimiter - DISABLED temporarily */ async (req, res) => {
+router.post('/aadhaar/digilocker/complete', serviceAuthMiddleware, async (req, res) => {
   try {
     const userId = req.headers['x-user-id'] || req.body.userId;
-    const { refId } = req.body;
+    const { verification_id: verificationId } = req.body;
 
-    // Validation
     if (!userId) {
+      return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
+    }
+
+    if (!verificationId) {
       return res.status(400).json(errorResponse(
-        'Missing required field: userId',
-        'User ID is required'
+        'Missing verification_id',
+        'verification_id is required'
       ));
     }
 
-    logger.info('🔄 Resending Aadhaar OTP', {
-      userId,
-      refId,
-      ip: getClientIp(req)
-    });
-
-    // Get existing verification record
-    let verification;
-    if (refId) {
-      verification = await Verification.findOne({ 
-        userId,
-        $or: [
-          { refId: refId },
-          { transactionId: refId }
-        ]
-      });
-    } else {
-      verification = await Verification.findByUserId(userId);
-    }
-
-    if (!verification) {
-      logger.warn('⚠️ No verification record found for user', { userId });
+    const session = await KycSession.findByVerificationId(verificationId);
+    if (!session) {
       return res.status(404).json(errorResponse(
-        'No verification found',
-        'Please initiate verification first'
+        'Session not found',
+        'No DigiLocker session found'
       ));
     }
 
-    if (verification.status === 'verified') {
+    if (session.userId !== userId) {
+      return res.status(403).json(errorResponse('Forbidden', 'This session does not belong to you'));
+    }
+
+    if (session.status === 'completed') {
+      const verification = await Verification.findByUserIdAndType(userId, 'aadhaar');
+      return res.json(successResponse({
+        alreadyVerified: true,
+        status: 'verified',
+        maskedAadhaar: verification?.maskedAadhaar,
+        verifiedAt: verification?.verifiedAt
+      }, 'Already verified'));
+    }
+
+    // Get Aadhaar document from Cashfree
+    const docResult = await digilockerService.getDocument(verificationId, 'AADHAAR');
+
+    if (docResult.status !== 'SUCCESS') {
+      const reason = docResult.status === 'AADHAAR_NOT_LINKED'
+        ? 'Aadhaar is not linked in DigiLocker. Please link Aadhaar and retry.'
+        : docResult.message || 'Failed to fetch document';
+
+      session.status = 'failed';
+      session.failureReason = reason;
+      await session.save();
+
       return res.status(400).json(errorResponse(
-        'Already verified',
-        'This user is already verified'
+        reason,
+        reason,
+        docResult.status || 'DOCUMENT_FETCH_FAILED'
       ));
     }
 
-    // Check if OTP was sent recently (cooldown: 60 seconds)
-    if (verification.otpSentAt) {
-      const timeSinceLastOTP = Date.now() - new Date(verification.otpSentAt).getTime();
-      if (timeSinceLastOTP < 60000) { // 60 seconds
-        const remainingSeconds = Math.ceil((60000 - timeSinceLastOTP) / 1000);
-        return res.status(429).json(errorResponse(
-          'Please wait before requesting another OTP',
-          `You can request a new OTP after ${remainingSeconds} seconds`,
-          'RESEND_COOLDOWN'
-        ));
-      }
-    }
-
-    // Resend OTP via Cashfree
-    const otpResult = await cashfreeService.resendAadhaarOTP(verification.refId);
-
-    if (!otpResult.success) {
-      return res.status(400).json(errorResponse(
-        otpResult.message || 'Failed to resend OTP',
-        'Could not resend OTP'
-      ));
-    }
-
-    // Update verification record
     const now = new Date();
-    const otpExpiresAt = new Date(now.getTime() + 10 * 60 * 1000); // OTP expires in 10 minutes
-    
-    verification.otpSentAt = now;
-    verification.otpExpiresAt = otpExpiresAt;
-    verification.otpAttempts = 0; // Reset attempts on resend
-    verification.status = 'otp_sent';
-    verification.refId = otpResult.refId; // Update refId if it changed
-    await verification.save();
+    const maskedAadhaar = docResult.uid || 'XXXX XXXX XXXX';
+    const verifiedData = {
+      name: docResult.name,
+      yearOfBirth: docResult.year_of_birth,
+      gender: docResult.gender,
+      careOf: docResult.care_of,
+      photoLink: docResult.photo_link,
+      address: docResult.split_address
+    };
 
-    logger.info('✅ Aadhaar OTP resent successfully', {
+    // Create or update Verification
+    let verification = await Verification.findByUserIdAndType(userId, 'aadhaar');
+    const verificationPayload = {
       userId,
-      refId: otpResult.refId
-    });
+      type: 'aadhaar',
+      status: 'verified',
+      provider: 'cashfree',
+      verificationSource: 'self_service_api',
+      maskedAadhaar,
+      verifiedData,
+      verifiedAt: now,
+      kycSessionId: session._id,
+      consent: {
+        given: true,
+        givenAt: session.createdAt,
+        consentVersion: 'v1.0',
+        consentText: 'User consented to Aadhaar verification via DigiLocker'
+      },
+      auditLog: [{
+        action: 'verified',
+        performedBy: userId,
+        performedAt: now,
+        metadata: { method: 'digilocker', verificationId }
+      }]
+    };
 
-    const response = successResponse({
-      refId: otpResult.refId,
-      maskedAadhaar: verification.maskedAadhaar,
-      message: otpResult.message || 'OTP resent successfully'
-    }, 'OTP resent successfully');
-
-    // In sandbox, include test OTP for testing convenience
-    if (cashfreeService.isSandbox()) {
-      response.data.testOtp = cashfreeService.getTestOtp();
-      response.data.message = 'OTP resent successfully (Sandbox mode - use test OTP for testing)';
+    if (verification) {
+      Object.assign(verification, verificationPayload);
+      await verification.save();
+    } else {
+      verification = await Verification.create(verificationPayload);
     }
 
-    res.json(response);
+    session.status = 'completed';
+    session.consentExpiresAt = session.documentConsentValidity;
+    await session.save();
+
+    // Update User Service
+    try {
+      await userService.updateAadhaarVerificationStatus(userId, {
+        isAadhaarVerified: true,
+        aadhaarVerifiedAt: now.toISOString(),
+        maskedAadhaar,
+        verifiedData: {
+          name: verifiedData.name,
+          gender: verifiedData.gender,
+          yearOfBirth: verifiedData.yearOfBirth
+        }
+      });
+    } catch (updateError) {
+      logger.error('Failed to update User Service (non-blocking)', {
+        userId,
+        error: updateError.message
+      });
+    }
+
+    logger.info('✅ DigiLocker verification completed', { userId, verificationId });
+
+    res.json(successResponse({
+      status: 'verified',
+      maskedAadhaar,
+      verifiedData: {
+        name: verifiedData.name,
+        gender: verifiedData.gender,
+        yearOfBirth: verifiedData.yearOfBirth
+      }
+    }, 'Aadhaar verification successful'));
   } catch (error) {
-    logger.error('❌ Error resending OTP', {
+    logger.error('❌ DigiLocker complete error', {
       error: error.message,
       stack: error.stack,
-      userId: req.headers['x-user-id'] || req.body.userId
+      userId: req.headers['x-user-id'] || req.body?.userId
     });
 
     res.status(500).json(errorResponse(
-      error.message || 'Failed to resend OTP',
-      'An error occurred while resending OTP'
+      error.response?.data?.message || error.message || 'Failed to complete verification',
+      'An error occurred while completing verification'
     ));
   }
 });
+
+// =====================================================
+// STATUS & BADGE ROUTES
+// =====================================================
 
 /**
  * GET /api/v1/verification/status/:userId
@@ -634,8 +436,7 @@ router.get('/status/:userId', serviceAuthMiddleware, async (req, res) => {
       type: verification.type,
       maskedAadhaar: verification.maskedAadhaar,
       provider: verification.provider,
-      verifiedAt: verification.verifiedAt,
-      attemptsRemaining: Math.max(0, 3 - (verification.otpAttempts || 0))
+      verifiedAt: verification.verifiedAt
     }));
   } catch (error) {
     logger.error('❌ Error fetching verification status', {

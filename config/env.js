@@ -50,6 +50,9 @@ const envSchema = z.object({
   // User Service URL (for updating user profiles after verification)
   USER_SERVICE_URL: z.string().url().optional(),
   
+  // DigiLocker redirect URL (frontend callback after user completes DigiLocker flow)
+  DIGILOCKER_REDIRECT_URL: z.string().url().optional(),
+  
   // Logging
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
   
@@ -146,6 +149,7 @@ function validateEnv() {
     console.log(`   Cashfree Environment: ${env.CASHFREE_ENV}`);
     console.log(`   Cashfree Base URL: ${getCashfreeBaseUrl(env)}`);
     console.log(`   MongoDB: ${env.MONGODB_URI ? 'Configured' : 'Not configured (in-memory fallback)'}`);
+    console.log(`   DigiLocker Redirect: ${env.DIGILOCKER_REDIRECT_URL || 'Not configured'}`);
     console.log('   Feature Flags:');
     console.log(`     - Aadhaar: ${env.FEATURE_AADHAAR === 'true' ? '✅ ENABLED' : '🔒 DISABLED'}`);
     console.log(`     - PAN: ${env.FEATURE_PAN === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);

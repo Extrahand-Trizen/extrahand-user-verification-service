@@ -142,6 +142,11 @@ const VerificationSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: 'Verification'
   },
+  // DigiLocker KYC session (when verification done via DigiLocker)
+  kycSessionId: {
+    type: Schema.Types.ObjectId,
+    ref: 'KycSession'
+  },
   
   // ===== ENHANCED CONSENT & COMPLIANCE =====
   consent: {
@@ -230,6 +235,7 @@ VerificationSchema.index({ refId: 1 });
 VerificationSchema.index({ createdAt: -1 });
 VerificationSchema.index({ provider: 1, status: 1 });
 VerificationSchema.index({ 'complianceFlags.scheduledDeletionAt': 1 }); // For cleanup jobs
+VerificationSchema.index({ kycSessionId: 1 });
 
 // ===== PRE-SAVE HOOK =====
 VerificationSchema.pre('save', function(next) {
