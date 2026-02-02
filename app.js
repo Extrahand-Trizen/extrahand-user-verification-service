@@ -9,14 +9,17 @@ const mongoose = require('mongoose');
 const { validateEnv, getCorsConfig } = require('./config/env');
 const logger = require('./config/logger');
 const verificationRouter = require('./routes/verification');
+const emailVerificationRouter = require('./routes/emailVerification');
 const webhooksRouter = require('./routes/webhooks');
 const digilockerService = require('./services/digilockerService');
+const { EmailServiceClient } = require('./services/emailServiceClient');
 
 // Validate environment variables
 const env = validateEnv();
 
 // Initialize DigiLocker service (Aadhaar verification via Cashfree)
 digilockerService.initialize(env);
+EmailServiceClient.initialize();
 
 const app = express();
 
@@ -121,6 +124,7 @@ app.get('/health', async (req, res) => {
 
 // API routes
 app.use('/api/v1/verification', verificationRouter);
+app.use('/api/v1/verification', emailVerificationRouter);
 
 // 404 handler for API routes
 app.use('/api', (req, res) => {

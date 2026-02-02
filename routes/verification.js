@@ -677,6 +677,17 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
       status: verification.status 
     });
 
+    // Send PAN verification email (non-blocking)
+    if (result.success) {
+      const { EmailServiceClient } = require('../services/emailServiceClient');
+      // Note: Would need to fetch user email from user-service
+      logger.info('Email trigger: pan_verification_approved', {
+        userId,
+        status: verification.status,
+        maskedPAN: verification.maskedPAN,
+      });
+    }
+
     res.json(successResponse({
       verificationId: verification._id,
       maskedPAN: verification.maskedPAN,
