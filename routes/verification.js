@@ -677,6 +677,30 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
       status: verification.status 
     });
 
+    // Update User Service with PAN verification status (when successful)
+    if (result.success) {
+      try {
+        const userServiceUpdate = await userService.updatePANVerificationStatus(userId, {
+          isPANVerified: true,
+          panVerifiedAt: new Date().toISOString(),
+          maskedPAN: verification.maskedPAN
+        });
+        if (userServiceUpdate.success) {
+          logger.info('✅ [VERIFICATION → USER SERVICE] User Service updated with PAN verification', { userId });
+        } else {
+          logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to update User Service with PAN verification (non-blocking)', {
+            userId,
+            error: userServiceUpdate.error
+          });
+        }
+      } catch (updateError) {
+        logger.error('❌ [VERIFICATION → USER SERVICE] Error updating User Service for PAN (non-blocking)', {
+          userId,
+          error: updateError.message
+        });
+      }
+    }
+
     // Send PAN verification email (non-blocking)
     if (result.success) {
       const { EmailServiceClient } = require('../services/emailServiceClient');

@@ -99,6 +99,74 @@ class UserService {
   }
 
   /**
+   * Update user profile with PAN verification status
+   * @param {string} userId - User ID (uid)
+   * @param {Object} verificationData - Verification data to update
+   * @returns {Promise<Object>} Response from user service
+   */
+  async updatePANVerificationStatus(userId, verificationData = {}) {
+    try {
+      if (!this.serviceAuthToken) {
+        throw new Error('SERVICE_AUTH_TOKEN not configured');
+      }
+
+      const url = `${this.baseURL}/api/v1/profiles/${userId}/verification/pan`;
+
+      const requestPayload = {
+        isPANVerified: true,
+        panVerifiedAt: new Date().toISOString(),
+        ...verificationData
+      };
+
+      logger.info('📞 [USER SERVICE] Calling User Service to update PAN verification', {
+        userId,
+        url,
+        method: 'PATCH',
+        payload: requestPayload
+      });
+
+      const response = await axios.patch(
+        url,
+        requestPayload,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'verification-service',
+            'X-User-Id': userId,
+            'Authorization': `Bearer ${this.serviceAuthToken}`
+          },
+          timeout: this.timeout
+        }
+      );
+
+      logger.info('✅ [USER SERVICE] User Service updated PAN verification status', {
+        userId,
+        status: response.status,
+        responseData: response.data
+      });
+
+      return {
+        success: true,
+        data: response.data
+      };
+    } catch (error) {
+      logger.error('❌ [USER SERVICE] Failed to update User Service with PAN verification', {
+        userId,
+        error: error.message,
+        status: error.response?.status,
+        responseData: error.response?.data
+      });
+
+      return {
+        success: false,
+        error: error.message,
+        status: error.response?.status
+      };
+    }
+  }
+
+  /**
    * Update user profile with Bank verification status
    * @param {string} userId - User ID (uid)
    * @param {Object} verificationData - Verification data to update

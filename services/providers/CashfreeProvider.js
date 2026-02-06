@@ -462,21 +462,34 @@ class CashfreeProvider extends BaseVerificationProvider {
       }
     }
 
-    // Production: Call actual Cashfree API
+    // Production: Call Cashfree Verify PAN API (POST /pan)
+    // Ref: https://www.cashfree.com/docs/api-reference/vrs/v2/pan/verify-pan-sync
     try {
       const response = await axios.post(
-        `${this.baseUrl}/pan/verify`,
-        { pan_number: panNumber },
+        `${this.baseUrl}/pan`,
+        { pan: panNumber },
         { headers: this.getHeaders(), timeout: 30000 }
       );
+
+      const data = response.data;
+      const valid = data.valid === true && (data.pan_status === 'VALID' || data.valid);
+      const name = data.registered_name || data.name_provided || data.name_pan_card;
+
+      if (!valid) {
+        return {
+          success: false,
+          message: data.message || 'Invalid PAN',
+          data: null
+        };
+      }
 
       return {
         success: true,
         data: {
-          name: response.data.name,
-          panNumber: response.data.pan_number,
-          maskedPAN: this.maskPAN(panNumber),
-          status: response.data.status,
+          name: name || '—',
+          panNumber: data.pan || panNumber,
+          maskedPAN: this.maskPAN(data.pan || panNumber),
+          status: data.pan_status || 'VALID',
         }
       };
     } catch (error) {
