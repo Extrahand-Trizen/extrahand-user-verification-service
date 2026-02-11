@@ -518,7 +518,7 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
   // ✅ PAN VERIFICATION - ACTIVE
   try {
     const userId = req.headers['x-user-id'] || req.body.userId;
-    const { panNumber, consent } = req.body;
+    const { panNumber, name, consent } = req.body;
 
     if (!userId) {
       return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
@@ -583,7 +583,7 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     
     let result;
     try {
-      result = await provider.verifyPAN(panNumber);
+      result = await provider.verifyPAN(panNumber, name);
       logger.info('✅ Provider returned result', { 
         success: result?.success,
         hasData: !!result?.data
@@ -591,10 +591,12 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     } catch (providerError) {
       logger.error('❌ Provider.verifyPAN threw error', {
         error: providerError.message,
-        stack: providerError.stack,
+        status: providerError.statusCode ?? providerError.response?.status,
         response: providerError.response?.data
       });
-      throw providerError;
+      const status = providerError.statusCode ?? providerError.response?.status ?? 500;
+      const message = providerError.response?.data?.message ?? providerError.message ?? 'PAN verification failed';
+      return res.status(status).json(errorResponse(message, message));
     }
 
     // Create or update verification record
@@ -606,6 +608,8 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
       type: 'pan'
     });
 
+    const cashfreeReferenceId = result.data?.referenceId ?? result.data?.reference_id;
+
     if (verification) {
       // Update existing record
       verification.status = result.success ? 'verified' : 'failed';
@@ -615,6 +619,7 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
         panNumber: result.data?.panNumber,
         status: result.data?.status
       };
+      if (cashfreeReferenceId != null) verification.refId = String(cashfreeReferenceId);
       verification.verifiedAt = result.success ? now : null;
       verification.failedAt = result.success ? null : now;
       verification.failureReason = result.success ? null : result.message;
@@ -625,7 +630,8 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
         ipAddress: getClientIp(req),
         metadata: {
           provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-          environment: process.env.CASHFREE_ENV || 'sandbox'
+          environment: process.env.CASHFREE_ENV || 'sandbox',
+          ...(cashfreeReferenceId != null && { referenceId: cashfreeReferenceId })
         }
       });
       await verification.save();
@@ -636,6 +642,7 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
       type: 'pan',
       status: result.success ? 'verified' : 'failed',
       provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+      refId: cashfreeReferenceId != null ? String(cashfreeReferenceId) : undefined,
       maskedPAN: result.data?.maskedPAN || (panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4)),
       verifiedData: { 
         name: result.data?.name,
@@ -657,7 +664,8 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
         ipAddress: getClientIp(req),
         metadata: {
           provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-          environment: process.env.CASHFREE_ENV || 'sandbox'
+          environment: process.env.CASHFREE_ENV || 'sandbox',
+          ...(cashfreeReferenceId != null && { referenceId: cashfreeReferenceId })
         }
       }],
       verifiedAt: result.success ? now : null,
@@ -718,8 +726,9 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
       verifiedData: {
         name: verification.verifiedData?.name
       },
-      status: verification.status
-    }, 'PAN verified successfully'));
+      status: verification.status,
+      ...(verification.refId && { referenceId: verification.refId })
+    }, result.success ? 'PAN verified successfully' : 'PAN verification failed'));
 
   } catch (error) {
     logger.error('❌ PAN verification error', { 

@@ -59,6 +59,16 @@ class CashfreeProvider extends BaseVerificationProvider {
   }
 
   /**
+   * Headers for PAN verification (includes x-api-version for aadhaar_seeding_status in response)
+   */
+  getPanHeaders() {
+    return {
+      ...this.getHeaders(),
+      'x-api-version': '2022-09-12'
+    };
+  }
+
+  /**
    * Check if service is in sandbox mode
    */
   isSandbox() {
@@ -419,11 +429,12 @@ class CashfreeProvider extends BaseVerificationProvider {
   // =====================================================
 
   /**
-   * Verify PAN card
+   * Verify PAN card (Verify PAN Sync - live/sandbox)
    * @param {string} panNumber - PAN number (e.g., ABCDE1234F)
-   * @returns {Promise<{success: boolean, data?: object}>}
+   * @param {string} [name] - Optional name as per PAN (for name_match in response)
+   * @returns {Promise<{success: boolean, data?: object, message?: string}>}
    */
-  async verifyPAN(panNumber) {
+  async verifyPAN(panNumber, name) {
     if (!/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(panNumber)) {
       throw new Error('Invalid PAN format');
     }
@@ -437,11 +448,6 @@ class CashfreeProvider extends BaseVerificationProvider {
     if (this.isSandbox()) {
       const validPANs = ['ABCPV1234D', 'XYZP4321W', 'AZJPG7110R', 'ABCCD8000T', 'XYZH2000L', 'AAAHU4383C', 'AMJCL2021N'];
       const isValid = validPANs.includes(panNumber);
-      
-      logger.info(`✅ [Cashfree] PAN verification (sandbox)`, {
-        pan: this.maskPAN(panNumber),
-        isValid
-      });
 
       if (isValid) {
         return {
@@ -451,50 +457,61 @@ class CashfreeProvider extends BaseVerificationProvider {
             panNumber: panNumber,
             maskedPAN: this.maskPAN(panNumber),
             status: 'VALID',
+            referenceId: 161
           }
         };
-      } else {
-        return {
-          success: false,
-          message: 'Invalid PAN number',
-          data: null
-        };
       }
+      return {
+        success: false,
+        message: 'Invalid PAN number',
+        data: null
+      };
     }
 
-    // Production: Call Cashfree Verify PAN API (POST /pan)
-    // Ref: https://www.cashfree.com/docs/api-reference/vrs/v2/pan/verify-pan-sync
+    // Production: Call Cashfree Verify PAN API (POST /pan) with retry for 429/5xx
+    const body = { pan: panNumber };
+    if (name && String(name).trim()) {
+      body.name = String(name).trim();
+    }
+
     try {
-      const response = await axios.post(
-        `${this.baseUrl}/pan`,
-        { pan: panNumber },
-        { headers: this.getHeaders(), timeout: 30000 }
+      return await retryWithBackoff(
+        async () => {
+          const response = await axios.post(
+            `${this.baseUrl}/pan`,
+            body,
+            { headers: this.getPanHeaders(), timeout: 30000 }
+          );
+
+          const data = response.data;
+          const valid = data.valid === true;
+
+          if (!valid) {
+            return {
+              success: false,
+              message: data.message || 'Invalid PAN',
+              data: null
+            };
+          }
+
+          const displayName = data.registered_name || data.name_provided || data.name_pan_card;
+          return {
+            success: true,
+            data: {
+              name: displayName || '—',
+              panNumber: data.pan || panNumber,
+              maskedPAN: this.maskPAN(data.pan || panNumber),
+              status: data.pan_status || 'VALID',
+              referenceId: data.reference_id
+            }
+          };
+        },
+        { maxRetries: 3, initialDelay: 1000, backoffMultiplier: 2 }
       );
-
-      const data = response.data;
-      const valid = data.valid === true && (data.pan_status === 'VALID' || data.valid);
-      const name = data.registered_name || data.name_provided || data.name_pan_card;
-
-      if (!valid) {
-        return {
-          success: false,
-          message: data.message || 'Invalid PAN',
-          data: null
-        };
-      }
-
-      return {
-        success: true,
-        data: {
-          name: name || '—',
-          panNumber: data.pan || panNumber,
-          maskedPAN: this.maskPAN(data.pan || panNumber),
-          status: data.pan_status || 'VALID',
-        }
-      };
     } catch (error) {
       logger.error('❌ [Cashfree] PAN verification error', {
         error: error.message,
+        status: error.statusCode || error.response?.status,
         response: error.response?.data
       });
       throw error;
