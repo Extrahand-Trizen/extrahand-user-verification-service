@@ -542,21 +542,52 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     // ✨ NEW: Check if PAN is already verified for this user
     const existingVerification = await Verification.findOne({
       userId,
-      type: 'pan',
-      status: 'verified'
+    type: 'pan',
+    status: 'verified'
     });
 
     if (existingVerification) {
-      logger.info('✅ PAN already verified for user', { userId, verificationId: existingVerification._id });
-      return res.json(successResponse({
+    logger.info('✅ PAN already verified for user', { userId, verificationId: existingVerification._id });
+
+    // ✅ Ensure User Service profile is also marked as PAN-verified (idempotent, non-blocking)
+    try {
+      const now = new Date().toISOString();
+      const updateResult = await userService.updatePANVerificationStatus(userId, {
+        isPANVerified: true,
+        panVerifiedAt: now,
+        maskedPAN: existingVerification.maskedPAN
+      });
+
+      if (updateResult.success) {
+        logger.info('✅ [VERIFICATION → USER SERVICE] Synced existing PAN verification to User Service profile', {
+          userId,
+          verificationId: existingVerification._id
+        });
+      } else {
+        logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to sync existing PAN verification to User Service (non-blocking)', {
+          userId,
+          verificationId: existingVerification._id,
+          error: updateResult.error,
+          status: updateResult.status
+        });
+      }
+    } catch (syncError) {
+      logger.error('❌ [VERIFICATION → USER SERVICE] Error syncing existing PAN verification (non-blocking)', {
+        userId,
         verificationId: existingVerification._id,
-        maskedPAN: existingVerification.maskedPAN,
-        verifiedData: {
-          name: existingVerification.verifiedData?.name
-        },
-        status: 'verified',
-        alreadyVerified: true
-      }, 'PAN is already verified'));
+        error: syncError.message
+      });
+    }
+
+    return res.json(successResponse({
+      verificationId: existingVerification._id,
+      maskedPAN: existingVerification.maskedPAN,
+      verifiedData: {
+        name: existingVerification.verifiedData?.name
+      },
+      status: 'verified',
+      alreadyVerified: true
+    }, 'PAN is already verified'));
     }
 
     // Get verification provider

@@ -127,9 +127,37 @@ function getCorsConfig(env) {
 
 // Get Cashfree base URL based on environment
 function getCashfreeBaseUrl(env) {
-  return env.CASHFREE_ENV === 'production' 
-    ? env.CASHFREE_PRODUCTION_URL 
+  const isProductionEnv = env.CASHFREE_ENV === 'production';
+
+  // Start from configured URL (or defaults from schema)
+  let rawUrl = isProductionEnv
+    ? env.CASHFREE_PRODUCTION_URL
     : env.CASHFREE_SANDBOX_URL;
+
+  // Safety guard: if someone accidentally points production to sandbox (or vice‑versa),
+  // force the correct host based on CASHFREE_ENV.
+  if (isProductionEnv && /sandbox\.cashfree\.com/i.test(rawUrl)) {
+    rawUrl = 'https://api.cashfree.com/verification';
+  } else if (!isProductionEnv && /api\.cashfree\.com/i.test(rawUrl)) {
+    rawUrl = 'https://sandbox.cashfree.com/verification';
+  }
+
+  // Ensure the path ends with `/verification`
+  try {
+    const url = new URL(rawUrl);
+    if (!url.pathname.endsWith('/verification')) {
+      // Normalize so we always have exactly `/verification`
+      url.pathname = '/verification';
+      rawUrl = url.toString().replace(/\/+$/, ''); // drop trailing slash
+    }
+  } catch {
+    // If URL constructor fails for some reason, fall back to sensible defaults
+    rawUrl = isProductionEnv
+      ? 'https://api.cashfree.com/verification'
+      : 'https://sandbox.cashfree.com/verification';
+  }
+
+  return rawUrl;
 }
 
 function validateEnv() {

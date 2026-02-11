@@ -175,7 +175,18 @@ const VerificationSchema = new Schema({
   auditLog: [{
     action: {
       type: String,
-      enum: ['initiated', 'otp_sent', 'otp_verified', 'otp_failed', 'verified', 'failed', 'expired', 'consent_withdrawn']
+      enum: [
+        'initiated',
+        'otp_sent',
+        'otp_verified',
+        'otp_failed',
+        'verified',
+        'reverified',
+        'retry_failed',
+        'failed',
+        'expired',
+        'consent_withdrawn'
+      ]
     },
     performedBy: String, // userId or 'system'
     performedAt: {
