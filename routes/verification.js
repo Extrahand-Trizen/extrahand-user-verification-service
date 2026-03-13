@@ -62,7 +62,7 @@ router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, r
     }
 
     const userId = req.headers['x-user-id'] || req.body.userId;
-    const { mobileNumber, aadhaarNumber, consentGiven } = req.body;
+    const { mobileNumber, aadhaarNumber, consentGiven, redirectUrl: clientRedirectUrl, redirect_url: clientRedirectUrlAlt } = req.body;
 
     if (!userId) {
       return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
@@ -93,7 +93,12 @@ router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, r
       }
     }
 
-    const redirectUrl = process.env.DIGILOCKER_REDIRECT_URL;
+    // Prefer client-provided redirect (e.g. mobile app deep link); fallback to env (web callback)
+    const rawRedirect =
+      (typeof clientRedirectUrl === 'string' && clientRedirectUrl.trim()) ||
+      (typeof clientRedirectUrlAlt === 'string' && clientRedirectUrlAlt.trim()) ||
+      process.env.DIGILOCKER_REDIRECT_URL;
+    const redirectUrl = rawRedirect ? String(rawRedirect).trim() : '';
     if (!redirectUrl) {
       return res.status(500).json(errorResponse(
         'DIGILOCKER_REDIRECT_URL not configured',
