@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const KycSession = require('../models/KycSession');
+const { finalizeDigilockerSession } = require('../services/digilockerCompletionService');
 const logger = require('../config/logger');
 
 /**
@@ -91,6 +92,31 @@ router.post('/digilocker', async (req, res) => {
     }
 
     await session.save();
+
+    // Primary resilience path: complete verification on webhook itself,
+    // so mobile redirect/callback timing does not affect final status.
+    if (event_type === 'DIGILOCKER_VERIFICATION_SUCCESS') {
+      try {
+        const result = await finalizeDigilockerSession({
+          verificationId,
+          userId: session.userId,
+          completionSource: 'webhook',
+        });
+        if (!result.success && !result.alreadyCompleted) {
+          logger.warn('Webhook auto-completion deferred', {
+            verificationId,
+            userId: session.userId,
+            error: result.error,
+          });
+        }
+      } catch (completeError) {
+        logger.error('Webhook auto-completion failed (will rely on app callback fallback)', {
+          verificationId,
+          userId: session.userId,
+          error: completeError?.message || completeError,
+        });
+      }
+    }
 
     logger.info('✅ Webhook processed', {
       verificationId,

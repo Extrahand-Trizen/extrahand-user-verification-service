@@ -5,6 +5,7 @@ const Verification = require('../models/Verification');
 const KycSession = require('../models/KycSession');
 const { getVerificationProvider } = require('../services/providerFactory');
 const digilockerService = require('../services/digilockerService');
+const { finalizeDigilockerSession } = require('../services/digilockerCompletionService');
 const { serviceAuthMiddleware } = require('../middleware/auth');
 const userService = require('../services/userService');
 const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar } = require('../utils/validation');
@@ -316,113 +317,29 @@ router.post('/aadhaar/digilocker/complete', serviceAuthMiddleware, async (req, r
       return res.status(403).json(errorResponse('Forbidden', 'This session does not belong to you'));
     }
 
-    if (session.status === 'completed') {
-      const verification = await Verification.findByUserIdAndType(userId, 'aadhaar');
-      return res.json(successResponse({
-        alreadyVerified: true,
-        status: 'verified',
-        maskedAadhaar: verification?.maskedAadhaar,
-        verifiedAt: verification?.verifiedAt
-      }, 'Already verified'));
-    }
+    const result = await finalizeDigilockerSession({
+      verificationId,
+      userId,
+      completionSource: 'app_callback',
+    });
 
-    // Get Aadhaar document from Cashfree
-    const docResult = await digilockerService.getDocument(verificationId, 'AADHAAR');
-
-    if (docResult.status !== 'SUCCESS') {
-      const reason = docResult.status === 'AADHAAR_NOT_LINKED'
-        ? 'Aadhaar is not linked in DigiLocker. Please link Aadhaar and retry.'
-        : docResult.message || 'Failed to fetch document';
-
-      session.status = 'failed';
-      session.failureReason = reason;
-      await session.save();
-
+    if (!result.success) {
       return res.status(400).json(errorResponse(
-        reason,
-        reason,
-        docResult.status || 'DOCUMENT_FETCH_FAILED'
+        result.error,
+        result.error,
+        result.code || 'COMPLETION_FAILED'
       ));
     }
 
-    const now = new Date();
-    const maskedAadhaar = docResult.uid || 'XXXX XXXX XXXX';
-    const verifiedData = {
-      name: docResult.name,
-      yearOfBirth: docResult.year_of_birth,
-      gender: docResult.gender,
-      careOf: docResult.care_of,
-      photoLink: docResult.photo_link,
-      address: docResult.split_address
-    };
-
-    // Create or update Verification
-    let verification = await Verification.findByUserIdAndType(userId, 'aadhaar');
-    const verificationPayload = {
-      userId,
-      type: 'aadhaar',
-      status: 'verified',
-      provider: 'cashfree',
-      verificationSource: 'self_service_api',
-      maskedAadhaar,
-      verifiedData,
-      verifiedAt: now,
-      kycSessionId: session._id,
-      consent: {
-        given: true,
-        givenAt: session.createdAt,
-        consentVersion: 'v1.0',
-        consentText: 'User consented to Aadhaar verification via DigiLocker'
-      },
-      auditLog: [{
-        action: 'verified',
-        performedBy: userId,
-        performedAt: now,
-        metadata: { method: 'digilocker', verificationId }
-      }]
-    };
-
-    if (verification) {
-      Object.assign(verification, verificationPayload);
-      await verification.save();
-    } else {
-      verification = await Verification.create(verificationPayload);
-    }
-
-    session.status = 'completed';
-    session.consentExpiresAt = session.documentConsentValidity;
-    await session.save();
-
-    // Update User Service
-    try {
-      await userService.updateAadhaarVerificationStatus(userId, {
-        isAadhaarVerified: true,
-        aadhaarVerifiedAt: now.toISOString(),
-        maskedAadhaar,
-        verifiedData: {
-          name: verifiedData.name,
-          gender: verifiedData.gender,
-          yearOfBirth: verifiedData.yearOfBirth
-        }
-      });
-    } catch (updateError) {
-      logger.error('Failed to update User Service (non-blocking)', {
-        userId,
-        error: updateError.message
-      });
-    }
-
-    logger.info('✅ DigiLocker verification completed', { userId, verificationId });
+    logger.info('DigiLocker verification completed via API', { userId, verificationId });
 
     res.json(successResponse({
+      alreadyVerified: result.alreadyCompleted || false,
       status: 'verified',
-      maskedAadhaar,
-      verifiedData: {
-        name: verifiedData.name,
-        gender: verifiedData.gender,
-        yearOfBirth: verifiedData.yearOfBirth
-      }
-    }, 'Aadhaar verification successful'));
+      maskedAadhaar: result.maskedAadhaar,
+      verifiedData: result.verifiedData,
+      verifiedAt: result.verifiedAt,
+    }, result.alreadyCompleted ? 'Already verified' : 'Aadhaar verification successful'));
   } catch (error) {
     logger.error('❌ DigiLocker complete error', {
       error: error.message,
