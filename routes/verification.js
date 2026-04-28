@@ -204,6 +204,12 @@ router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, r
  */
 router.get('/aadhaar/digilocker/status', serviceAuthMiddleware, async (req, res) => {
   try {
+    const isTruthyFlag = (value) => {
+      if (value === true || value === 1) return true;
+      const token = String(value || '').trim().toUpperCase();
+      return token === 'Y' || token === 'YES' || token === 'TRUE' || token === '1';
+    };
+
     const verificationId = req.query.verification_id;
     const userId = req.headers['x-user-id'];
 
@@ -240,13 +246,30 @@ router.get('/aadhaar/digilocker/status', serviceAuthMiddleware, async (req, res)
     session.userDetails = statusResult.user_details || session.userDetails || {};
     await session.save();
 
+    const statusToken = String(statusResult.status || '').trim().toUpperCase();
+    const userDetails = statusResult.user_details || {};
+    // Cashfree payload shape can vary across environments; don't hardcode only eaadhaar === 'Y'.
+    const hasEaadhaarConsent =
+      isTruthyFlag(userDetails.eaadhaar) ||
+      isTruthyFlag(userDetails.eAadhaar) ||
+      isTruthyFlag(userDetails.e_aadhaar) ||
+      isTruthyFlag(userDetails.aadhaar_consent) ||
+      isTruthyFlag(statusResult.document_consent);
+    const hasAadhaarDetails =
+      Boolean(userDetails.masked_aadhaar) ||
+      Boolean(userDetails.maskedAadhaar) ||
+      Boolean(userDetails.aadhaar_last4) ||
+      Boolean(userDetails.name);
+    const readyForComplete =
+      statusToken === 'AUTHENTICATED' && (hasEaadhaarConsent || hasAadhaarDetails);
+
     res.json(successResponse({
       verification_id: verificationId,
       status: statusResult.status,
       document_consent: statusResult.document_consent,
       document_consent_validity: statusResult.document_consent_validity,
       user_details: statusResult.user_details,
-      ready_for_complete: statusResult.status === 'AUTHENTICATED' && statusResult.user_details?.eaadhaar === 'Y'
+      ready_for_complete: readyForComplete
     }, 'Status retrieved'));
   } catch (error) {
     logger.error('❌ DigiLocker status error', {
