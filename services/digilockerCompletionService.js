@@ -15,6 +15,17 @@ const logger = require('../config/logger');
  * @param {string} params.completionSource - 'app_callback' | 'webhook' | 'reconcile_job'
  * @returns {Promise<{success: boolean, alreadyCompleted?: boolean, maskedAadhaar?: string, verifiedData?: object, error?: string}>}
  */
+async function returnAlreadyCompleted(userId) {
+  const existing = await Verification.findByUserIdAndType(userId, 'aadhaar');
+  return {
+    success: true,
+    alreadyCompleted: true,
+    maskedAadhaar: existing?.maskedAadhaar,
+    verifiedData: existing?.verifiedData,
+    verifiedAt: existing?.verifiedAt,
+  };
+}
+
 async function finalizeDigilockerSession({ verificationId, userId, completionSource = 'app_callback' }) {
   if (!verificationId || !userId) {
     return { success: false, error: 'Missing verificationId or userId' };
@@ -26,14 +37,7 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
   }
 
   if (session.status === 'completed') {
-    const existing = await Verification.findByUserIdAndType(userId, 'aadhaar');
-    return {
-      success: true,
-      alreadyCompleted: true,
-      maskedAadhaar: existing?.maskedAadhaar,
-      verifiedData: existing?.verifiedData,
-      verifiedAt: existing?.verifiedAt,
-    };
+    return returnAlreadyCompleted(userId);
   }
 
   const docResult = await digilockerService.getDocument(verificationId, 'AADHAAR');
@@ -49,6 +53,22 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
       await session.save();
     }
     return { success: false, error: reason, code: docResult?.status || 'DOCUMENT_FETCH_FAILED' };
+  }
+
+  // Atomic idempotency guard: claim the session for completion.
+  // If two callers (webhook + app_callback) race past the initial check above,
+  // only the one whose findOneAndUpdate matches a non-completed session wins.
+  const claimed = await KycSession.findOneAndUpdate(
+    { verificationId, status: { $ne: 'completed' } },
+    { $set: { status: 'completing' } },
+    { new: true },
+  );
+
+  if (!claimed) {
+    logger.info('finalizeDigilockerSession: lost idempotency race (another caller completed first)', {
+      verificationId, userId, completionSource,
+    });
+    return returnAlreadyCompleted(userId);
   }
 
   const now = new Date();
@@ -94,9 +114,11 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
     verification = await Verification.create(verificationPayload);
   }
 
-  session.status = 'completed';
-  session.consentExpiresAt = session.documentConsentValidity || session.consentExpiresAt;
-  await session.save();
+  // Transition from transient 'completing' to final 'completed'.
+  claimed.status = 'completed';
+  claimed.completionSource = completionSource;
+  claimed.consentExpiresAt = claimed.documentConsentValidity || claimed.consentExpiresAt;
+  await claimed.save();
 
   try {
     await userService.updateAadhaarVerificationStatus(userId, {

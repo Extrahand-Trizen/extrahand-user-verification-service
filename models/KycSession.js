@@ -28,6 +28,7 @@ const KycSessionSchema = new Schema(
       enum: [
         'pending',
         'in_progress',
+        'completing',
         'completed',
         'failed',
         'expired',
@@ -35,6 +36,10 @@ const KycSessionSchema = new Schema(
       ],
       default: 'pending',
       index: true,
+    },
+    completionSource: {
+      type: String,
+      enum: ['webhook', 'app_callback', 'reconcile_job'],
     },
 
     // From Verify Account
