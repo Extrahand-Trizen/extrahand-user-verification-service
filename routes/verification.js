@@ -236,10 +236,27 @@ router.get('/aadhaar/digilocker/status', serviceAuthMiddleware, async (req, res)
       ));
     }
 
+    // Short-circuit: if session is already completed (by webhook or prior call),
+    // return immediately without hitting Cashfree API.
+    if (session.status === 'completed' || session.status === 'completing') {
+      return res.json(successResponse({
+        verification_id: verificationId,
+        status: 'COMPLETED',
+        document_consent: session.documentConsent,
+        document_consent_validity: session.documentConsentValidity,
+        user_details: session.userDetails || {},
+        ready_for_complete: true,
+        session_completed: true,
+      }, 'Already completed'));
+    }
+
     const statusResult = await digilockerService.getStatus(verificationId);
 
-    // Update session with latest status
-    session.status = statusResult.status === 'AUTHENTICATED' ? 'in_progress' : session.status;
+    // Only allow status progression — never regress from terminal/near-terminal states.
+    const TERMINAL_STATUSES = ['completed', 'completing', 'failed', 'expired', 'consent_denied'];
+    if (!TERMINAL_STATUSES.includes(session.status)) {
+      session.status = statusResult.status === 'AUTHENTICATED' ? 'in_progress' : session.status;
+    }
     session.documentConsent = statusResult.document_consent || session.documentConsent;
     session.documentConsentValidity = statusResult.document_consent_validity
       ? new Date(statusResult.document_consent_validity)
@@ -249,7 +266,6 @@ router.get('/aadhaar/digilocker/status', serviceAuthMiddleware, async (req, res)
 
     const statusToken = String(statusResult.status || '').trim().toUpperCase();
     const userDetails = statusResult.user_details || {};
-    // Cashfree payload shape can vary across environments; don't hardcode only eaadhaar === 'Y'.
     const hasEaadhaarConsent =
       isTruthyFlag(userDetails.eaadhaar) ||
       isTruthyFlag(userDetails.eAadhaar) ||
@@ -270,7 +286,7 @@ router.get('/aadhaar/digilocker/status', serviceAuthMiddleware, async (req, res)
       document_consent: statusResult.document_consent,
       document_consent_validity: statusResult.document_consent_validity,
       user_details: statusResult.user_details,
-      ready_for_complete: readyForComplete
+      ready_for_complete: readyForComplete,
     }, 'Status retrieved'));
   } catch (error) {
     logger.error('❌ DigiLocker status error', {

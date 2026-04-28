@@ -53,7 +53,7 @@ const VerificationSchema = new Schema({
   // ===== VERIFICATION SOURCE TRACKING (for admin vs self-service) =====
   verificationSource: {
     type: String,
-    enum: ['self_service_api', 'admin_manual', 'admin_api', 'system'],
+    enum: ['self_service_api', 'admin_manual', 'admin_api', 'system', 'webhook', 'app_callback', 'reconcile_job'],
     default: 'self_service_api',
     required: true,
     index: true
