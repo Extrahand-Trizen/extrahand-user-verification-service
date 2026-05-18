@@ -43,6 +43,21 @@ const envSchema = z.object({
   FEATURE_BANK: z.string().default('false'),
   FEATURE_FACE: z.string().default('false'),
   FEATURE_LIVENESS: z.string().default('false'),
+  FEATURE_AADHAAR_OCR: z.string().default('false'),
+
+  // Aadhaar Smart OCR
+  OCR_RATE_LIMIT_PER_DAY: z.string().transform(Number).default('5'),
+  /** Cashfree bharat-ocr HTTP timeout (ms) */
+  CASHFREE_OCR_TIMEOUT_MS: z.string().transform(Number).default('90000'),
+  OCR_FAILURE_VISIBILITY_MINUTES_MIN: z.string().optional(),
+  OCR_FAILURE_VISIBILITY_MINUTES_MAX: z.string().optional(),
+  KYC_VAULT_BUCKET_NAME: z.string().optional(),
+  KYC_VAULT_ENDPOINT: z.string().optional(),
+  KYC_VAULT_PORT: z.string().optional(),
+  KYC_VAULT_USE_SSL: z.string().optional(),
+  KYC_VAULT_ACCESS_KEY: z.string().optional(),
+  KYC_VAULT_SECRET_KEY: z.string().optional(),
+  KYC_VAULT_REGION: z.string().optional(),
   
   // Main Backend URL (for callbacks if needed)
   MAIN_BACKEND_URL: z.string().url().optional(),
@@ -184,6 +199,7 @@ function validateEnv() {
     console.log(`     - Bank: ${env.FEATURE_BANK === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);
     console.log(`     - Face: ${env.FEATURE_FACE === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);
     console.log(`     - Liveness: ${env.FEATURE_LIVENESS === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);
+    console.log(`     - Aadhaar OCR: ${env.FEATURE_AADHAAR_OCR === 'true' ? '✅ ENABLED' : '🔒 DISABLED'}`);
     
     return {
       ...env,

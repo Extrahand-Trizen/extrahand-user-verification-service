@@ -32,9 +32,15 @@ const VerificationSchema = new Schema({
   // ===== STATUS =====
   status: {
     type: String,
-    enum: ['pending', 'otp_sent', 'otp_verified', 'verified', 'failed', 'expired'],
+    enum: ['pending', 'otp_sent', 'otp_verified', 'under_review', 'verified', 'failed', 'expired'],
     default: 'pending',
     index: true
+  },
+
+  verificationMethod: {
+    type: String,
+    enum: ['digilocker', 'aadhaar_ocr', 'aadhaar_otp', 'admin_manual'],
+    index: true,
   },
   
   // ===== PROVIDER INFORMATION =====
@@ -82,6 +88,16 @@ const VerificationSchema = new Schema({
   
   // ===== AADHAAR FIELDS (ACTIVE) =====
   maskedAadhaar: String, // Format: XXXX XXXX 1234
+
+  /** OCR-only summaries (no raw OCR JSON, no full Aadhaar) */
+  ocrMetadata: {
+    fraudSummary: mongoose.Schema.Types.Mixed,
+    qualitySummary: mongoose.Schema.Types.Mixed,
+    qrValidationStatus: String,
+    visibleToUserAt: Date,
+    internalCompletedAt: Date,
+    userVisibleAt: Date,
+  },
   
   // ===== EMAIL FIELDS =====
   maskedEmail: String, // Format: j***@example.com
@@ -94,6 +110,8 @@ const VerificationSchema = new Schema({
   // ===== VERIFIED DATA (MASKED/ENCRYPTED) =====
   verifiedData: {
     name: String,
+    /** Full date of birth from OCR/QR (e.g. YYYY-MM-DD or DD-MM-YYYY as returned by provider) */
+    dob: String,
     yearOfBirth: String,
     gender: String,
     address: {

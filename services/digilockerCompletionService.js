@@ -73,8 +73,11 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
 
   const now = new Date();
   const maskedAadhaar = docResult.uid || 'XXXX XXXX XXXX';
+  const dob =
+    docResult.dob || docResult.date_of_birth || docResult.dateOfBirth || undefined;
   const verifiedData = {
     name: docResult.name,
+    dob: dob ? String(dob).trim() : undefined,
     yearOfBirth: docResult.year_of_birth,
     gender: docResult.gender,
     careOf: docResult.care_of,
@@ -127,6 +130,7 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
       maskedAadhaar,
       verifiedData: {
         name: verifiedData.name,
+        dob: verifiedData.dob,
         gender: verifiedData.gender,
         yearOfBirth: verifiedData.yearOfBirth,
       },
@@ -148,6 +152,7 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
     maskedAadhaar,
     verifiedData: {
       name: verifiedData.name,
+      dob: verifiedData.dob,
       gender: verifiedData.gender,
       yearOfBirth: verifiedData.yearOfBirth,
     },

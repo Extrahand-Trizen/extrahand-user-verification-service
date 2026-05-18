@@ -20,12 +20,14 @@ const KycSessionSchema = new Schema(
     },
     sessionType: {
       type: String,
-      enum: ['digilocker'],
+      enum: ['digilocker', 'aadhaar_ocr'],
       default: 'digilocker',
+      index: true,
     },
     status: {
       type: String,
       enum: [
+        // DigiLocker lifecycle
         'pending',
         'in_progress',
         'completing',
@@ -33,8 +35,43 @@ const KycSessionSchema = new Schema(
         'failed',
         'expired',
         'consent_denied',
+        // Aadhaar OCR lifecycle (mirrors internalStatus for queries)
+        'awaiting_front',
+        'awaiting_back',
+        'processing',
+        'cancelled',
       ],
       default: 'pending',
+      index: true,
+    },
+    /** Backend truth for OCR sessions */
+    internalStatus: {
+      type: String,
+      enum: [
+        'awaiting_front',
+        'awaiting_back',
+        'processing',
+        'completing',
+        'completed',
+        'failed',
+        'expired',
+        'cancelled',
+      ],
+      index: true,
+    },
+    /** User-facing status — frontend MUST use this for OCR */
+    visibleStatus: {
+      type: String,
+      enum: ['pending', 'under_review', 'verified', 'failed', 'expired', 'cancelled'],
+      index: true,
+    },
+    visibleToUserAt: {
+      type: Date,
+      index: true,
+    },
+    /** When user may see FAILED after internal failure (lazy resolution) */
+    visibleFailureAt: {
+      type: Date,
       index: true,
     },
     completionSource: {
@@ -74,6 +111,28 @@ const KycSessionSchema = new Schema(
 
     // Error tracking
     failureReason: String,
+
+    // ===== Aadhaar Smart OCR (sessionType: aadhaar_ocr) =====
+    ocr: {
+      frontImageKey: String,
+      backImageKey: String,
+      frontUploadedAt: Date,
+      backUploadedAt: Date,
+      frontOcrAt: Date,
+      backOcrAt: Date,
+      cashfreeVerificationIdFront: String,
+      cashfreeVerificationIdBack: String,
+      fraudSummary: mongoose.Schema.Types.Mixed,
+      qualitySummary: mongoose.Schema.Types.Mixed,
+      qrValidationStatus: String,
+      maskedAadhaar: String,
+      frontExtracted: mongoose.Schema.Types.Mixed,
+      backExtracted: mongoose.Schema.Types.Mixed,
+      merged: mongoose.Schema.Types.Mixed,
+      purgeScheduledAt: Date,
+      imagesPurgedAt: Date,
+      profileSyncedAt: Date,
+    },
   },
   {
     timestamps: true,
@@ -84,6 +143,10 @@ const KycSessionSchema = new Schema(
 KycSessionSchema.index({ userId: 1, status: 1 });
 KycSessionSchema.index({ userId: 1, createdAt: -1 });
 KycSessionSchema.index({ referenceId: 1 });
+KycSessionSchema.index({ userId: 1, sessionType: 1, status: 1 });
+KycSessionSchema.index({ sessionType: 1, visibleToUserAt: 1, visibleStatus: 1 });
+KycSessionSchema.index({ sessionType: 1, visibleFailureAt: 1, visibleStatus: 1 });
+KycSessionSchema.index({ 'ocr.purgeScheduledAt': 1, 'ocr.imagesPurgedAt': 1 });
 
 /**
  * Find session by verification_id
@@ -97,6 +160,17 @@ KycSessionSchema.statics.findByVerificationId = function (verificationId) {
  */
 KycSessionSchema.statics.findLatestByUserId = function (userId) {
   return this.findOne({ userId }).sort({ createdAt: -1 });
+};
+
+/**
+ * Find latest active session for user by session type
+ */
+KycSessionSchema.statics.findActiveByUserId = function (userId, sessionType, activeStatuses) {
+  return this.findOne({
+    userId,
+    sessionType,
+    status: { $in: activeStatuses },
+  }).sort({ createdAt: -1 });
 };
 
 const KycSession = model('KycSession', KycSessionSchema);

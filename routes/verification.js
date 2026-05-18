@@ -6,6 +6,7 @@ const KycSession = require('../models/KycSession');
 const { getVerificationProvider } = require('../services/providerFactory');
 const digilockerService = require('../services/digilockerService');
 const { finalizeDigilockerSession } = require('../services/digilockerCompletionService');
+const { assertNoActiveOcrSession } = require('../services/sessionExclusionService');
 const { serviceAuthMiddleware } = require('../middleware/auth');
 const userService = require('../services/userService');
 const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar } = require('../utils/validation');
@@ -18,6 +19,7 @@ const axios = require('axios');
 // =====================================================
 const FEATURES = {
   AADHAAR: process.env.FEATURE_AADHAAR !== 'false', // ✅ ENABLED by default
+  AADHAAR_OCR: process.env.FEATURE_AADHAAR_OCR === 'true',
   PAN: process.env.FEATURE_PAN === 'true',          // 🔒 DISABLED (ready to enable)
   BANK: process.env.FEATURE_BANK === 'true',        // 🔒 DISABLED (ready to enable)
   FACE: process.env.FEATURE_FACE === 'true',        // 🔒 DISABLED (ready to enable)
@@ -133,6 +135,8 @@ router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, r
       }, 'Aadhaar is already verified'));
     }
 
+    await assertNoActiveOcrSession(userId);
+
     const verificationId = `eh_${crypto.randomUUID().replace(/-/g, '')}`;
     const now = new Date();
     const urlExpiresAt = new Date(now.getTime() + 10 * 60 * 1000);
@@ -187,6 +191,14 @@ router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, r
       stack: error.stack,
       userId: req.headers['x-user-id'] || req.body?.userId
     });
+
+    if (error.statusCode === 409) {
+      return res.status(409).json(errorResponse(
+        error.message,
+        'Complete or cancel your in-progress Aadhaar OCR verification first',
+        error.code
+      ));
+    }
 
     const status = error.response?.status || 500;
     const message = error.response?.data?.message || error.message || 'Failed to initiate DigiLocker verification';
