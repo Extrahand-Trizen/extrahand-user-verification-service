@@ -32,8 +32,15 @@ class SmartOcrService {
         ? config.CASHFREE_OCR_TIMEOUT_MS
         : 90_000;
     this.initialized = true;
+    let cashfreeHost = this.baseUrl;
+    try {
+      cashfreeHost = new URL(this.baseUrl).host;
+    } catch {
+      // keep raw baseUrl
+    }
     logger.info('Smart OCR service initialized', {
       environment: config.CASHFREE_ENV,
+      cashfreeApiHost: cashfreeHost,
       ocrTimeoutMs: this.ocrTimeoutMs,
     });
   }

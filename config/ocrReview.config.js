@@ -20,9 +20,9 @@ const OCR_REVIEW_CONFIG = {
 
   /** Randomized delay before user sees "verified" (minutes) */
 
-  reviewDelayMinutesMin: parseIntEnv('OCR_REVIEW_DELAY_MINUTES_MIN', 15),
+  reviewDelayMinutesMin: parseIntEnv('OCR_REVIEW_DELAY_MINUTES_MIN', 5),
 
-  reviewDelayMinutesMax: parseIntEnv('OCR_REVIEW_DELAY_MINUTES_MAX', 45),
+  reviewDelayMinutesMax: parseIntEnv('OCR_REVIEW_DELAY_MINUTES_MAX', 10),
 
 
 
