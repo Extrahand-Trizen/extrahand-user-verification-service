@@ -13,6 +13,8 @@ const {
   logCashfreeResponseToTerminal,
 } = require('../utils/sanitizeCashfreeResponse');
 const { redactForLog } = require('../utils/loggerRedaction');
+const { isVerificationTestMode } = require('../config/env');
+const { buildMockOcrRaw } = require('./mockOcrResponses');
 
 class SmartOcrService {
   constructor() {
@@ -20,6 +22,7 @@ class SmartOcrService {
     this.clientId = null;
     this.clientSecret = null;
     this.ocrTimeoutMs = 90_000;
+    this.testMode = false;
     this.initialized = false;
   }
 
@@ -27,6 +30,8 @@ class SmartOcrService {
     this.baseUrl = config.CASHFREE_BASE_URL || getCashfreeBaseUrl(config);
     this.clientId = config.CASHFREE_CLIENT_ID;
     this.clientSecret = config.CASHFREE_CLIENT_SECRET;
+    this.testMode =
+      config.VERIFICATION_TEST_MODE_ACTIVE === true || isVerificationTestMode(config);
     this.ocrTimeoutMs =
       Number.isFinite(config.CASHFREE_OCR_TIMEOUT_MS) && config.CASHFREE_OCR_TIMEOUT_MS > 0
         ? config.CASHFREE_OCR_TIMEOUT_MS
@@ -42,7 +47,13 @@ class SmartOcrService {
       environment: config.CASHFREE_ENV,
       cashfreeApiHost: cashfreeHost,
       ocrTimeoutMs: this.ocrTimeoutMs,
+      testMode: this.testMode,
     });
+    if (this.testMode) {
+      logger.warn(
+        '🧪 Smart OCR TEST MODE — using mock OCR fixtures (no Cashfree bharat-ocr HTTP)',
+      );
+    }
   }
 
   getHeaders(contentType) {
@@ -76,6 +87,18 @@ class SmartOcrService {
     side = 'front',
   }) {
     if (!this.initialized) throw new Error('Smart OCR service not initialized');
+
+    if (this.testMode) {
+      logger.info('Smart OCR request (TEST MODE)', redactForLog({ verificationId, documentType, side }));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const raw = buildMockOcrRaw({ verificationId, side });
+      logCashfreeResponseToTerminal(raw, { verificationId, side, mock: true });
+      logger.info('Smart OCR mock response summary', sanitizeCashfreeResponse(raw));
+      return {
+        raw,
+        mapped: mapOcrResponse(raw, side),
+      };
+    }
 
     const form = new FormData();
     form.append('verification_id', verificationId);

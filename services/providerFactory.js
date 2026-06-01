@@ -1,5 +1,7 @@
 const CashfreeProvider = require('./providers/CashfreeProvider');
+const MockProvider = require('./providers/MockProvider');
 const logger = require('../config/logger');
+const { isVerificationTestMode } = require('../config/env');
 
 /**
  * Provider Factory
@@ -24,11 +26,18 @@ const logger = require('../config/logger');
  * @returns {BaseVerificationProvider} Verification provider instance
  */
 function getVerificationProvider(config) {
-  const providerName = config.VERIFICATION_PROVIDER || 'cashfree';
-  
+  let providerName = config.VERIFICATION_PROVIDER || 'cashfree';
+  if (isVerificationTestMode(config) && providerName === 'cashfree') {
+    providerName = 'mock';
+    logger.info('🧪 VERIFICATION_TEST_MODE — using mock provider for OTP/PAN/bank flows');
+  }
+
   logger.info(`🔧 Initializing verification provider: ${providerName}`);
   
   switch (providerName.toLowerCase()) {
+    case 'mock':
+      return new MockProvider(config);
+
     case 'cashfree':
       return new CashfreeProvider(config);
     
@@ -55,6 +64,7 @@ function getVerificationProvider(config) {
 function getAvailableProviders() {
   return [
     'cashfree',    // ✅ Active
+    'mock',        // 🧪 Local / VERIFICATION_TEST_MODE
     // 'signzy',   // 🔒 Ready (uncomment when activated)
     // 'karza',    // 🔒 Ready (uncomment when activated)
   ];
@@ -76,6 +86,12 @@ function isProviderAvailable(providerName) {
  */
 function getProviderCapabilities(providerName) {
   const capabilities = {
+    mock: {
+      aadhaar: true,
+      pan: true,
+      bank: true,
+      face: true,
+    },
     cashfree: {
       aadhaar: true,
       pan: true,        // Ready but feature-flagged

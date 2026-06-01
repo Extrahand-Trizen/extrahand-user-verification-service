@@ -15,7 +15,10 @@ const envSchema = z.object({
   SERVICE_AUTH_TOKEN: z.string().min(1, 'SERVICE_AUTH_TOKEN is required'),
   
   // ===== PROVIDER SELECTION =====
-  VERIFICATION_PROVIDER: z.enum(['cashfree', 'signzy', 'karza']).default('cashfree'),
+  /** Use `mock` or set VERIFICATION_TEST_MODE=true for local dev without Cashfree IP whitelist */
+  VERIFICATION_PROVIDER: z.enum(['cashfree', 'signzy', 'karza', 'mock']).default('cashfree'),
+  /** When true: Smart OCR uses fixtures (no bharat-ocr HTTP). Blocked in production. */
+  VERIFICATION_TEST_MODE: z.enum(['true', 'false']).default('false'),
   
   // ===== CASHFREE CONFIGURATION (ACTIVE) =====
   CASHFREE_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
@@ -175,9 +178,17 @@ function getCashfreeBaseUrl(env) {
   return rawUrl;
 }
 
+function isVerificationTestMode(env) {
+  return env.VERIFICATION_TEST_MODE === 'true';
+}
+
 function validateEnv() {
   try {
     const env = envSchema.parse(process.env);
+
+    if (isVerificationTestMode(env) && env.NODE_ENV === 'production') {
+      throw new Error('VERIFICATION_TEST_MODE cannot be enabled when NODE_ENV=production');
+    }
     
     // Validate MongoDB URI if provided
     if (!env.MONGODB_URI && env.NODE_ENV === 'production') {
@@ -189,6 +200,9 @@ function validateEnv() {
     console.log(`   Environment: ${env.NODE_ENV}`);
     console.log(`   Port: ${env.PORT}`);
     console.log(`   Verification Provider: ${env.VERIFICATION_PROVIDER}`);
+    console.log(
+      `   Verification test mode: ${isVerificationTestMode(env) ? '🧪 ON (mock Smart OCR)' : 'off'}`,
+    );
     console.log(`   Cashfree Environment: ${env.CASHFREE_ENV}`);
     console.log(`   Cashfree Base URL: ${getCashfreeBaseUrl(env)}`);
     console.log(`   MongoDB: ${env.MONGODB_URI ? 'Configured' : 'Not configured (in-memory fallback)'}`);
@@ -203,7 +217,8 @@ function validateEnv() {
     
     return {
       ...env,
-      CASHFREE_BASE_URL: getCashfreeBaseUrl(env)
+      CASHFREE_BASE_URL: getCashfreeBaseUrl(env),
+      VERIFICATION_TEST_MODE_ACTIVE: isVerificationTestMode(env),
     };
   } catch (error) {
     console.error('❌ Environment validation failed:');
@@ -222,6 +237,7 @@ module.exports = {
   validateEnv, 
   envSchema, 
   getCorsConfig,
-  getCashfreeBaseUrl
+  getCashfreeBaseUrl,
+  isVerificationTestMode,
 };
 
