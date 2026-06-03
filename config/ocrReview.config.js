@@ -46,9 +46,9 @@ const OCR_REVIEW_CONFIG = {
 
 
 
-  /** Image retention after failed OCR (minutes) — delete quickly */
+  /** Image retention after failed OCR (days) — kept for ops/admin review */
 
-  imageRetentionMinutesFailure: parseIntEnv('OCR_IMAGE_RETENTION_MINUTES_FAILURE', 30),
+  imageRetentionDaysFailure: parseIntEnv('OCR_IMAGE_RETENTION_DAYS_FAILURE', 7),
 
 
 

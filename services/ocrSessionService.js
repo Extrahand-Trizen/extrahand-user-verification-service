@@ -280,7 +280,9 @@ function schedulePurgeAt(success) {
 
   }
 
-  return new Date(now + OCR_REVIEW_CONFIG.imageRetentionMinutesFailure * 60 * 1000);
+  return new Date(
+    now + OCR_REVIEW_CONFIG.imageRetentionDaysFailure * 24 * 60 * 60 * 1000,
+  );
 
 }
 
@@ -416,7 +418,33 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
 
   if (!validation.accepted) {
 
-    await kycVaultStorage.deleteObject(storageKey);
+    const failedAt = new Date();
+
+    if (side === 'front') {
+
+      session.ocr = {
+
+        ...session.ocr,
+
+        frontImageKey: storageKey,
+
+        frontUploadedAt: failedAt,
+
+      };
+
+    } else {
+
+      session.ocr = {
+
+        ...session.ocr,
+
+        backImageKey: storageKey,
+
+        backUploadedAt: failedAt,
+
+      };
+
+    }
 
     await failSession(session, validation.rejectReason, validation.code);
 
@@ -506,7 +534,15 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
 
   if (!consistency.accepted) {
 
-    await kycVaultStorage.deleteObject(storageKey);
+    session.ocr = {
+
+      ...session.ocr,
+
+      backImageKey: storageKey,
+
+      backUploadedAt: new Date(),
+
+    };
 
     await failSession(session, consistency.rejectReason, consistency.code);
 
