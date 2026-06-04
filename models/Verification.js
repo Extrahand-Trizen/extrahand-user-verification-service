@@ -88,6 +88,34 @@ const VerificationSchema = new Schema({
   
   // ===== AADHAAR FIELDS (ACTIVE) =====
   maskedAadhaar: String, // Format: XXXX XXXX 1234
+  /** HMAC-SHA256 of 12-digit Aadhaar (peppered). Set only when status is verified. */
+  aadhaarHash: {
+    type: String,
+    index: true,
+    sparse: true,
+    select: false,
+  },
+  /** Identity fingerprint (last4 + name + dob). Set only when status is verified. */
+  aadhaarIdentityHash: {
+    type: String,
+    index: true,
+    sparse: true,
+    select: false,
+  },
+  aadhaarLast4: {
+    type: String,
+    index: true,
+    sparse: true,
+    select: false,
+  },
+  identityNameNormalized: {
+    type: String,
+    select: false,
+  },
+  identityDobNormalized: {
+    type: String,
+    select: false,
+  },
 
   /** OCR-only summaries (no raw OCR JSON, no full Aadhaar) */
   ocrMetadata: {
@@ -271,6 +299,28 @@ VerificationSchema.index({ createdAt: -1 });
 VerificationSchema.index({ provider: 1, status: 1 });
 VerificationSchema.index({ 'complianceFlags.scheduledDeletionAt': 1 }); // For cleanup jobs
 VerificationSchema.index({ kycSessionId: 1 });
+VerificationSchema.index(
+  { type: 1, aadhaarHash: 1 },
+  {
+    unique: true,
+    sparse: true,
+    partialFilterExpression: {
+      type: 'aadhaar',
+      aadhaarHash: { $type: 'string' },
+    },
+  }
+);
+VerificationSchema.index(
+  { type: 1, aadhaarIdentityHash: 1 },
+  {
+    unique: true,
+    sparse: true,
+    partialFilterExpression: {
+      type: 'aadhaar',
+      aadhaarIdentityHash: { $type: 'string' },
+    },
+  }
+);
 
 // ===== PRE-SAVE HOOK =====
 VerificationSchema.pre('save', function(next) {

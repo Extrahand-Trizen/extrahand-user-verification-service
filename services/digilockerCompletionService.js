@@ -3,6 +3,14 @@ const KycSession = require('../models/KycSession');
 const digilockerService = require('./digilockerService');
 const userService = require('./userService');
 const logger = require('../config/logger');
+const { maskAadhaar } = require('../utils/validation');
+const {
+  assertAadhaarFingerprintNotRegisteredToOtherUser,
+  applyFingerprintToTarget,
+  buildAadhaarFingerprintFromOcr,
+  normalizeAadhaarDigits,
+  AadhaarDuplicateError,
+} = require('../utils/aadhaarHash');
 
 /**
  * Shared DigiLocker session finalization logic.
@@ -72,9 +80,45 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
   }
 
   const now = new Date();
-  const maskedAadhaar = docResult.uid || 'XXXX XXXX XXXX';
+  const uidRaw = docResult.uid || docResult.aadhaar_number || docResult.masked_aadhaar || '';
+  const aadhaarDigits = normalizeAadhaarDigits(uidRaw);
+  let maskedAadhaar = 'XXXX XXXX XXXX';
+
+  if (aadhaarDigits) {
+    maskedAadhaar = maskAadhaar(aadhaarDigits);
+  } else if (uidRaw) {
+    maskedAadhaar = String(uidRaw);
+  }
+
   const dob =
     docResult.dob || docResult.date_of_birth || docResult.dateOfBirth || undefined;
+  const fingerprint = buildAadhaarFingerprintFromOcr({
+    mapped: {
+      _omit: { uid: uidRaw },
+      name: docResult.name,
+      dob: dob ? String(dob).trim() : undefined,
+      maskedAadhaar,
+    },
+    merged: {
+      name: docResult.name,
+      dob: dob ? String(dob).trim() : undefined,
+      maskedAadhaar,
+    },
+    maskedAadhaar,
+  });
+
+  try {
+    await assertAadhaarFingerprintNotRegisteredToOtherUser(fingerprint, userId);
+  } catch (error) {
+    if (error instanceof AadhaarDuplicateError) {
+      claimed.status = 'failed';
+      claimed.failureReason = error.message;
+      await claimed.save();
+      return { success: false, error: error.message, code: error.code };
+    }
+    throw error;
+  }
+
   const verifiedData = {
     name: docResult.name,
     dob: dob ? String(dob).trim() : undefined,
@@ -112,9 +156,12 @@ async function finalizeDigilockerSession({ verificationId, userId, completionSou
 
   if (verification) {
     Object.assign(verification, verificationPayload);
+    applyFingerprintToTarget(verification, fingerprint);
     await verification.save();
   } else {
-    verification = await Verification.create(verificationPayload);
+    verification = await Verification.create(
+      applyFingerprintToTarget({ ...verificationPayload }, fingerprint),
+    );
   }
 
   // Transition from transient 'completing' to final 'completed'.

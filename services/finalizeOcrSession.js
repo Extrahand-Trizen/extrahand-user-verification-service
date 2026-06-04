@@ -10,6 +10,10 @@ const logger = require('../config/logger');
 const { buildPersistableOcrMetadata } = require('../utils/sanitizeCashfreeResponse');
 const { computeVisibleToUserAt } = require('../config/ocrReview.config');
 const { redactForLog } = require('../utils/loggerRedaction');
+const {
+  assertAadhaarFingerprintNotRegisteredToOtherUser,
+  buildAadhaarFingerprintFromOcr,
+} = require('../utils/aadhaarHash');
 
 async function returnAlreadyCompleted(userId) {
   const existing = await Verification.findByUserIdAndType(userId, 'aadhaar');
@@ -63,6 +67,14 @@ async function finalizeOcrSession({ verificationId, userId, mapped, session }) {
   const visibleToUserAt = computeVisibleToUserAt(now);
   const persistMeta = buildPersistableOcrMetadata(mapped);
   const maskedAadhaar = mapped.maskedAadhaar || session.ocr?.maskedAadhaar;
+  const fingerprint = buildAadhaarFingerprintFromOcr({
+    mapped,
+    merged: session.ocr?.merged || mapped,
+    maskedAadhaar,
+  });
+
+  // Block duplicates against already-completed verifications only (hashes stored at verified).
+  await assertAadhaarFingerprintNotRegisteredToOtherUser(fingerprint, userId);
 
   const dob = mapped.dob ? String(mapped.dob).trim() : undefined;
   const yearOfBirth =

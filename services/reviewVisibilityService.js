@@ -17,11 +17,12 @@ const userService = require('./userService');
 const logger = require('../config/logger');
 
 const { redactForLog } = require('../utils/loggerRedaction');
-
-
+const {
+  buildAadhaarFingerprintFromOcr,
+  persistFingerprintOnVerifiedVerification,
+} = require('../utils/aadhaarHash');
 
 /**
-
  * Lazy transition: call on every status read (and after uploads).
 
  * @param {import('mongoose').Document} session
@@ -114,6 +115,31 @@ async function resolveSessionVisibilityById(verificationId, userId) {
 
  */
 
+/**
+ * Push verified Aadhaar KYC state to user-service profile (isAadhaarVerified, maskedAadhaar, etc.)
+ */
+async function syncVerifiedProfileToUserService(session, verification, verifiedAt = new Date()) {
+  const result = await userService.updateAadhaarVerificationStatus(session.userId, {
+    isAadhaarVerified: true,
+    aadhaarVerifiedAt: verifiedAt.toISOString(),
+    maskedAadhaar: verification?.maskedAadhaar || session.ocr?.maskedAadhaar,
+    verifiedData: {
+      name: verification?.verifiedData?.name || session.ocr?.merged?.name,
+      dob: verification?.verifiedData?.dob || session.ocr?.merged?.dob,
+      gender: verification?.verifiedData?.gender || session.ocr?.merged?.gender,
+      yearOfBirth: verification?.verifiedData?.yearOfBirth,
+    },
+  });
+
+  if (!result.success) {
+    throw new Error(result.error || 'User profile sync failed');
+  }
+
+  session.ocr = { ...(session.ocr || {}), profileSyncedAt: verifiedAt };
+  await session.save();
+  return result;
+}
+
 async function promoteToVisibleVerified(session) {
 
   const now = new Date();
@@ -162,6 +188,12 @@ async function promoteToVisibleVerified(session) {
 
     }
 
+    const fingerprint = buildAadhaarFingerprintFromOcr({
+      merged: session.ocr?.merged,
+      maskedAadhaar: verification.maskedAadhaar || session.ocr?.maskedAadhaar,
+    });
+    persistFingerprintOnVerifiedVerification(verification, fingerprint);
+
     await verification.save();
 
   }
@@ -169,43 +201,12 @@ async function promoteToVisibleVerified(session) {
 
 
   try {
-
-    await userService.updateAadhaarVerificationStatus(session.userId, {
-
-      isAadhaarVerified: true,
-
-      aadhaarVerifiedAt: now.toISOString(),
-
-      maskedAadhaar: verification?.maskedAadhaar || updated.ocr?.maskedAadhaar,
-
-      verifiedData: {
-
-        name: verification?.verifiedData?.name,
-
-        dob: verification?.verifiedData?.dob,
-
-        gender: verification?.verifiedData?.gender,
-
-        yearOfBirth: verification?.verifiedData?.yearOfBirth,
-
-      },
-
-    });
-
-    updated.ocr = { ...(updated.ocr || {}), profileSyncedAt: now };
-
-    await updated.save();
-
+    await syncVerifiedProfileToUserService(updated, verification, now);
   } catch (e) {
-
     logger.error('reviewVisibility: profile sync failed (non-blocking)', redactForLog({
-
       userId: session.userId,
-
       error: e.message,
-
     }));
-
   }
 
 
@@ -370,7 +371,40 @@ async function processDueReviewVisibility() {
 
 }
 
+/**
+ * Retry profile sync for OCR sessions already visible as verified but never synced to user profile.
+ */
+async function retryPendingProfileSyncs(limit = 20) {
+  const sessions = await KycSession.find({
+    sessionType: 'aadhaar_ocr',
+    visibleStatus: 'verified',
+    'ocr.profileSyncedAt': { $exists: false },
+  }).limit(limit);
 
+  let synced = 0;
+  let failed = 0;
+
+  for (const session of sessions) {
+    const verification = await Verification.findByUserIdAndType(session.userId, 'aadhaar');
+    try {
+      await syncVerifiedProfileToUserService(session, verification, session.verifiedAt || new Date());
+      synced += 1;
+      logger.info('OCR profile sync retry succeeded', redactForLog({
+        userId: session.userId,
+        verificationId: session.verification_id,
+      }));
+    } catch (e) {
+      failed += 1;
+      logger.error('OCR profile sync retry failed', redactForLog({
+        userId: session.userId,
+        verificationId: session.verification_id,
+        error: e.message,
+      }));
+    }
+  }
+
+  return { checked: sessions.length, synced, failed };
+}
 
 module.exports = {
 
@@ -383,6 +417,10 @@ module.exports = {
   promoteToVisibleFailed,
 
   processDueReviewVisibility,
+
+  syncVerifiedProfileToUserService,
+
+  retryPendingProfileSyncs,
 
 };
 
