@@ -53,7 +53,6 @@ const VerificationSchema = new Schema({
   transactionId: String,
   refId: {
     type: String,
-    index: true
   },
   
   // ===== VERIFICATION SOURCE TRACKING (for admin vs self-service) =====

@@ -580,44 +580,20 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
   const validation = validateOcrMappedResult(mapped);
 
   if (!validation.accepted) {
-
-<<<<<<< Updated upstream
     const failedAt = new Date();
 
-=======
->>>>>>> Stashed changes
     if (side === 'front') {
-
       session.ocr = {
-
         ...session.ocr,
-
         frontImageKey: storageKey,
-
-<<<<<<< Updated upstream
         frontUploadedAt: failedAt,
-=======
-        frontUploadedAt: new Date(),
->>>>>>> Stashed changes
-
       };
-
     } else {
-
-<<<<<<< Updated upstream
       session.ocr = {
-
         ...session.ocr,
-
         backImageKey: storageKey,
-
         backUploadedAt: failedAt,
-
       };
-=======
-      await kycVaultStorage.deleteObject(storageKey);
->>>>>>> Stashed changes
-
     }
 
     await failSession(session, validation.rejectReason, validation.code);
