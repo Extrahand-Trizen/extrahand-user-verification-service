@@ -185,28 +185,6 @@ router.get('/aadhaar/ocr/status', async (req, res) => {
 });
 
 /**
- * POST /aadhaar/ocr/report-upload-failure
- * Client sync — user-side network failure (stored locally until connectivity returns).
- */
-router.post('/aadhaar/ocr/report-upload-failure', async (req, res) => {
-  try {
-    const userId = getUserId(req);
-    const verificationId = req.body.verification_id || req.body.verificationId;
-    if (!userId || !verificationId) {
-      return res.status(400).json(errorResponse('Missing fields', 'userId and verification_id are required'));
-    }
-
-    const data = await ocrSessionService.reportUserNetworkIssue(userId, verificationId);
-    return res.json(successResponse(data, 'Upload network failure recorded'));
-  } catch (error) {
-    const status = error.statusCode || 500;
-    return res.status(status).json(
-      errorResponse(error.message, 'Could not record upload network failure', error.code)
-    );
-  }
-});
-
-/**
  * POST /aadhaar/ocr/cancel
  */
 router.post('/aadhaar/ocr/cancel', async (req, res) => {

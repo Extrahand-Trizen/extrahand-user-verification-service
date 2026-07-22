@@ -111,7 +111,6 @@ const KycSessionSchema = new Schema(
 
     // Error tracking
     failureReason: String,
-    failureCategory: String,
 
     // ===== Aadhaar Smart OCR (sessionType: aadhaar_ocr) =====
     ocr: {

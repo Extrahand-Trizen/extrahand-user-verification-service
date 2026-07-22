@@ -9,19 +9,6 @@ function countSoftFlags(summary, flagNames) {
   return flagNames.filter((f) => summary[f] === true).length;
 }
 
-/** Cashfree often returns verification_status:null while document_fields are populated. */
-function hasExtractedIdentity(mapped) {
-  if (!mapped) return false;
-  const name = String(mapped.name || '').trim();
-  if (name.length < 2) return false;
-  return Boolean(
-    mapped.dob ||
-      mapped.yearOfBirth ||
-      mapped.maskedAadhaar ||
-      mapped.qrSummary?.aadhaarLastFourMasked
-  );
-}
-
 function evaluateHardReject(summary, hardRejectMap) {
   for (const [key, mustBe] of Object.entries(hardRejectMap || {})) {
     if (mustBe === true && summary?.[key] === true) {

@@ -3,7 +3,8 @@
  */
 
 const KycSession = require('../models/KycSession');
-const { processDueReviewVisibility, retryPendingProfileSyncs } = require('./reviewVisibilityService');
+const Verification = require('../models/Verification');
+const { processDueReviewVisibility } = require('./reviewVisibilityService');
 const { OCR_REVIEW_CONFIG } = require('../config/ocrReview.config');
 const logger = require('../config/logger');
 
@@ -28,7 +29,18 @@ async function expireStaleOcrSessions() {
 }
 
 async function reconcileProfileSyncGaps() {
-  return retryPendingProfileSyncs(20);
+  const sessions = await KycSession.find({
+    sessionType: 'aadhaar_ocr',
+    visibleStatus: 'verified',
+    'ocr.profileSyncedAt': { $exists: false },
+  }).limit(20);
+
+  let fixed = 0;
+  for (const s of sessions) {
+    await processDueReviewVisibility();
+    fixed += 1;
+  }
+  return { checked: sessions.length, fixed };
 }
 
 async function runOcrReconciliation() {

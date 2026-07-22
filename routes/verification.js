@@ -10,13 +10,6 @@ const { assertNoActiveOcrSession } = require('../services/sessionExclusionServic
 const { serviceAuthMiddleware } = require('../middleware/auth');
 const userService = require('../services/userService');
 const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar } = require('../utils/validation');
-const {
-  assertAadhaarNotRegisteredToOtherUser,
-  assertAadhaarFingerprintNotRegisteredToOtherUser,
-  applyFingerprintToTarget,
-  buildAadhaarFingerprintFromOcr,
-  AadhaarDuplicateError,
-} = require('../utils/aadhaarHash');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
 const axios = require('axios');
@@ -100,19 +93,6 @@ router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, r
           'Invalid Aadhaar number format',
           'Aadhaar number must be exactly 12 digits'
         ));
-      }
-
-      try {
-        await assertAadhaarNotRegisteredToOtherUser(cleaned, userId);
-      } catch (error) {
-        if (error instanceof AadhaarDuplicateError) {
-          return res.status(409).json(errorResponse(
-            error.message,
-            error.message,
-            error.code
-          ));
-        }
-        throw error;
       }
     }
 
@@ -372,8 +352,7 @@ router.post('/aadhaar/digilocker/complete', serviceAuthMiddleware, async (req, r
     });
 
     if (!result.success) {
-      const status = result.code === 'AADHAAR_ALREADY_REGISTERED' ? 409 : 400;
-      return res.status(status).json(errorResponse(
+      return res.status(400).json(errorResponse(
         result.error,
         result.error,
         result.code || 'COMPLETION_FAILED'
@@ -1220,7 +1199,6 @@ router.post('/bulk-store', serviceAuthMiddleware, async (req, res) => {
       userId, 
       type, 
       maskedValue, 
-      aadhaarNumber,
       status, 
       verifiedAt, 
       provider, 
@@ -1249,45 +1227,6 @@ router.post('/bulk-store', serviceAuthMiddleware, async (req, res) => {
         'Missing required field: maskedValue',
         'Masked value is required'
       ));
-    }
-
-    let aadhaarFingerprintForStore = null;
-    if (type === 'aadhaar') {
-      try {
-        aadhaarFingerprintForStore = buildAadhaarFingerprintFromOcr({
-          mapped: {
-            _omit: { uid: aadhaarNumber || undefined },
-            maskedAadhaar: maskedValue,
-          },
-          merged: {
-            name: req.body.verifiedName || req.body.name,
-            dob: req.body.dob || req.body.dateOfBirth,
-            maskedAadhaar: maskedValue,
-          },
-          maskedAadhaar: maskedValue,
-        });
-
-        if (aadhaarNumber) {
-          const fullFingerprint = await assertAadhaarNotRegisteredToOtherUser(aadhaarNumber, userId);
-          if (fullFingerprint) {
-            aadhaarFingerprintForStore = {
-              ...aadhaarFingerprintForStore,
-              ...fullFingerprint,
-            };
-          }
-        }
-
-        await assertAadhaarFingerprintNotRegisteredToOtherUser(aadhaarFingerprintForStore, userId);
-      } catch (error) {
-        if (error instanceof AadhaarDuplicateError) {
-          return res.status(409).json(errorResponse(
-            error.message,
-            error.message,
-            error.code
-          ));
-        }
-        throw error;
-      }
     }
 
     logger.info('📦 [BULK STORE] Processing verification data', {
@@ -1355,7 +1294,6 @@ router.post('/bulk-store', serviceAuthMiddleware, async (req, res) => {
       // Update masked value based on type
       if (type === 'aadhaar') {
         verification.maskedAadhaar = maskedValue;
-        applyFingerprintToTarget(verification, aadhaarFingerprintForStore);
       } else if (type === 'pan') {
         verification.maskedPAN = maskedValue;
       }
@@ -1427,7 +1365,6 @@ router.post('/bulk-store', serviceAuthMiddleware, async (req, res) => {
       // Set masked value based on type
       if (type === 'aadhaar') {
         verificationData.maskedAadhaar = maskedValue;
-        applyFingerprintToTarget(verificationData, aadhaarFingerprintForStore);
       } else if (type === 'pan') {
         verificationData.maskedPAN = maskedValue;
       }

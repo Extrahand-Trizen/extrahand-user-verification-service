@@ -48,45 +48,8 @@ const {
 } = require('../utils/ocrExtractedData');
 
 const logger = require('../config/logger');
-const {
-  buildAadhaarFingerprintFromOcr,
-  checkDuplicateAadhaarFingerprint,
-  AadhaarDuplicateError,
-} = require('../utils/aadhaarHash');
 
-function buildOcrFingerprint(session, mapped, raw, merged) {
-  return buildAadhaarFingerprintFromOcr({
-    mapped,
-    raw,
-    merged,
-    maskedAadhaar: mapped?.maskedAadhaar || session.ocr?.maskedAadhaar,
-  });
-}
 
-async function rejectDuplicateAadhaar(session, userId, fingerprint, imageKeys = []) {
-  try {
-    await checkDuplicateAadhaarFingerprint(fingerprint, userId);
-  } catch (error) {
-    await handleDuplicateAadhaarError(session, userId, error, imageKeys);
-  }
-}
-
-async function handleDuplicateAadhaarError(session, userId, error, imageKeys = []) {
-  if (!(error instanceof AadhaarDuplicateError)) {
-    throw error;
-  }
-
-  if (imageKeys.length > 0) {
-    await kycVaultStorage.deleteObjects(imageKeys.filter(Boolean));
-  }
-
-  await failSessionImmediate(session, error.message, error.code);
-
-  const duplicateErr = new Error(error.message);
-  duplicateErr.statusCode = error.statusCode || 409;
-  duplicateErr.code = error.code;
-  throw duplicateErr;
-}
 
 function buildPublicStatusPayload(session) {
 
@@ -114,8 +77,6 @@ function buildPublicStatusPayload(session) {
       session.visibleStatus === 'verified' ? session.ocr?.maskedAadhaar : undefined,
 
     failureReason: showFailure ? session.failureReason : undefined,
-
-    failureCategory: showFailure ? session.failureCategory : undefined,
 
     extracted,
 
@@ -319,9 +280,7 @@ function schedulePurgeAt(success) {
 
   }
 
-  return new Date(
-    now + OCR_REVIEW_CONFIG.imageRetentionDaysFailure * 24 * 60 * 60 * 1000,
-  );
+  return new Date(now + OCR_REVIEW_CONFIG.imageRetentionMinutesFailure * 60 * 1000);
 
 }
 
@@ -363,106 +322,6 @@ async function failSession(session, reason, code) {
 
 
 
-async function failSessionImmediate(session, reason, code) {
-
-  session.internalStatus = 'failed';
-
-  session.status = 'failed';
-
-  session.visibleStatus = 'failed';
-
-  session.failureReason = reason;
-
-  session.failureCategory = code;
-
-  session.ocr = {
-
-    ...session.ocr,
-
-    purgeScheduledAt: schedulePurgeAt(false),
-
-  };
-
-  await session.save();
-
-  return session;
-
-}
-
-
-
-function isFrontVerificationFailedSession(session) {
-
-  return session.internalStatus === 'failed' && !session.ocr?.frontOcrAt;
-
-}
-
-
-
-/**
-
- * Store back image in MinIO for reference when front OCR verification failed (no OCR).
-
- */
-
-async function storeBackReferenceOnly(session, verificationId, { buffer, mimetype, userId }) {
-
-  const ext = extensionFromMime(mimetype);
-
-  const storageKey = generateOcrStorageKey({
-
-    userId,
-
-    sessionId: session.verification_id,
-
-    side: 'back',
-
-    extension: ext,
-
-  });
-
-
-
-  await kycVaultStorage.putObject(storageKey, buffer, mimetype);
-
-
-
-  const now = new Date();
-
-  session.ocr = {
-
-    ...session.ocr,
-
-    backImageKey: storageKey,
-
-    backUploadedAt: now,
-
-    purgeScheduledAt: session.ocr?.purgeScheduledAt || schedulePurgeAt(false),
-
-  };
-
-  await session.save();
-
-
-
-  const refreshed = await KycSession.findByVerificationId(verificationId);
-
-  return {
-
-    ...(await resolveAndBuildStatus(refreshed)),
-
-    side: 'back',
-
-    referenceOnly: true,
-
-    softFailure: true,
-
-  };
-
-}
-
-
-
 /**
 
  * Upload front or back image + run OCR.
@@ -488,30 +347,6 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
 
 
   const session = await loadUserSession(verificationId, userId);
-
-
-
-  if (side === 'back' && isFrontVerificationFailedSession(session)) {
-
-    if (session.ocr?.backImageKey) {
-
-      return {
-
-        ...(await resolveAndBuildStatus(session)),
-
-        side: 'back',
-
-        referenceOnly: true,
-
-        softFailure: true,
-
-      };
-
-    }
-
-    return storeBackReferenceOnly(session, verificationId, { buffer, mimetype, userId });
-
-  }
 
 
 
@@ -580,21 +415,8 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
   const validation = validateOcrMappedResult(mapped);
 
   if (!validation.accepted) {
-    const failedAt = new Date();
 
-    if (side === 'front') {
-      session.ocr = {
-        ...session.ocr,
-        frontImageKey: storageKey,
-        frontUploadedAt: failedAt,
-      };
-    } else {
-      session.ocr = {
-        ...session.ocr,
-        backImageKey: storageKey,
-        backUploadedAt: failedAt,
-      };
-    }
+    await kycVaultStorage.deleteObject(storageKey);
 
     await failSession(session, validation.rejectReason, validation.code);
 
@@ -623,14 +445,6 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
   if (side === 'front') {
 
     const frontExtracted = sideExtracted;
-
-    const fingerprint = buildOcrFingerprint(session, mapped, raw, frontExtracted);
-
-    try {
-      await rejectDuplicateAadhaar(session, userId, fingerprint, [storageKey]);
-    } catch (error) {
-      await handleDuplicateAadhaarError(session, userId, error, [storageKey]);
-    }
 
     session.ocr = {
 
@@ -692,15 +506,7 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
 
   if (!consistency.accepted) {
 
-    session.ocr = {
-
-      ...session.ocr,
-
-      backImageKey: storageKey,
-
-      backUploadedAt: new Date(),
-
-    };
+    await kycVaultStorage.deleteObject(storageKey);
 
     await failSession(session, consistency.rejectReason, consistency.code);
 
@@ -731,20 +537,6 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
   const merged = mergeOcrExtracted(session.ocr?.frontExtracted, backExtracted);
 
   const maskedAadhaar = mapped.maskedAadhaar || session.ocr?.maskedAadhaar;
-
-  const fingerprint = buildOcrFingerprint(session, mapped, raw, merged);
-
-  try {
-    await rejectDuplicateAadhaar(session, userId, fingerprint, [
-      storageKey,
-      session.ocr?.frontImageKey,
-    ]);
-  } catch (error) {
-    await handleDuplicateAadhaarError(session, userId, error, [
-      storageKey,
-      session.ocr?.frontImageKey,
-    ]);
-  }
 
   session.ocr = {
 
@@ -798,17 +590,6 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
 
     session,
 
-  }).catch(async (error) => {
-    if (error instanceof AadhaarDuplicateError) {
-      const keys = [session.ocr?.frontImageKey, session.ocr?.backImageKey].filter(Boolean);
-      await kycVaultStorage.deleteObjects(keys);
-      await failSessionImmediate(session, error.message, error.code);
-      const duplicateErr = new Error(error.message);
-      duplicateErr.statusCode = 409;
-      duplicateErr.code = error.code;
-      throw duplicateErr;
-    }
-    throw error;
   });
 
 
@@ -935,118 +716,6 @@ async function cancelSession(userId, verificationId) {
 
 
 
-const USER_NETWORK_ISSUE_CATEGORY = 'USER_NETWORK_ISSUE';
-
-const USER_NETWORK_ISSUE_REASON = 'User network issue';
-
-const NETWORK_ISSUE_UPDATABLE_STATUSES = ['awaiting_front', 'awaiting_back', 'processing'];
-
-
-
-/**
-
- * Record client-side upload network failure on the OCR session (no OCR retry).
-
- */
-
-async function reportUserNetworkIssue(userId, verificationId) {
-
-  const session = await loadUserSession(verificationId, userId);
-
-
-
-  if (
-
-    session.internalStatus === 'failed' &&
-
-    session.failureCategory === USER_NETWORK_ISSUE_CATEGORY
-
-  ) {
-
-    return {
-
-      ...buildPublicStatusPayload(session),
-
-      networkFailureRecorded: true,
-
-      failureCategory: session.failureCategory,
-
-      failureReason: session.failureReason,
-
-    };
-
-  }
-
-
-
-  if (!NETWORK_ISSUE_UPDATABLE_STATUSES.includes(session.internalStatus)) {
-
-    return {
-
-      ...buildPublicStatusPayload(session),
-
-      networkFailureRecorded: false,
-
-      failureCategory: session.failureCategory,
-
-      failureReason: session.failureReason,
-
-    };
-
-  }
-
-
-
-  session.status = 'failed';
-
-  session.internalStatus = 'failed';
-
-  session.visibleStatus = 'failed';
-
-  session.failureCategory = USER_NETWORK_ISSUE_CATEGORY;
-
-  session.failureReason = USER_NETWORK_ISSUE_REASON;
-
-  session.visibleFailureAt = new Date();
-
-  session.ocr = {
-
-    ...session.ocr,
-
-    purgeScheduledAt: session.ocr?.purgeScheduledAt || schedulePurgeAt(false),
-
-  };
-
-  await session.save();
-
-
-
-  logger.info('OCR session marked failed — user network issue', redactForLog({
-
-    userId,
-
-    verificationId,
-
-  }));
-
-
-
-  return {
-
-    ...buildPublicStatusPayload(session),
-
-    networkFailureRecorded: true,
-
-    failureCategory: session.failureCategory,
-
-    failureReason: session.failureReason,
-
-  };
-
-}
-
-
-
 module.exports = {
 
   initiateSession,
@@ -1056,8 +725,6 @@ module.exports = {
   getStatus,
 
   cancelSession,
-
-  reportUserNetworkIssue,
 
   buildPublicStatusPayload,
 

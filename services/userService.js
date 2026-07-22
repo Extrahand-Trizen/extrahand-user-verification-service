@@ -23,20 +23,19 @@ class UserService {
    * @returns {Promise<Object>} Response from user service
    */
   async updateAadhaarVerificationStatus(userId, verificationData = {}) {
-    let url;
-    let requestPayload;
     try {
       if (!this.serviceAuthToken) {
         throw new Error('SERVICE_AUTH_TOKEN not configured');
       }
 
-      // PATCH /api/v1/profiles/:uid/verification/aadhaar — service-to-service profile sync
-      url = `${this.baseURL}/api/v1/profiles/${userId}/verification/aadhaar`;
-
-      requestPayload = {
+      // ✨ FIX: Use PATCH /api/v1/profiles/:uid/verification/aadhaar endpoint with service auth
+      // This is the correct endpoint for service-to-service Aadhaar verification updates
+      const url = `${this.baseURL}/api/v1/profiles/${userId}/verification/aadhaar`;
+      
+      const requestPayload = {
         isAadhaarVerified: true,
-        aadhaarVerifiedAt: verificationData.aadhaarVerifiedAt || new Date().toISOString(),
-        ...verificationData,
+        aadhaarVerifiedAt: new Date().toISOString(),
+        ...verificationData
       };
       
       logger.info('📞 [USER SERVICE] Calling User Service to update Aadhaar verification', {
@@ -86,8 +85,8 @@ class UserService {
         status: error.response?.status,
         statusText: error.response?.statusText,
         responseData: error.response?.data,
-        requestUrl: url || `${this.baseURL}/api/v1/profiles/${userId}/verification/aadhaar`,
-        requestPayload: requestPayload || verificationData,
+        requestUrl: url,
+        requestPayload: requestPayload
       });
 
       // Don't throw - log and return failure so verification can still succeed
