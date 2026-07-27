@@ -280,9 +280,7 @@ function schedulePurgeAt(success) {
 
   }
 
-  return new Date(
-    now + OCR_REVIEW_CONFIG.imageRetentionDaysFailure * 24 * 60 * 60 * 1000,
-  );
+  return new Date(now + OCR_REVIEW_CONFIG.imageRetentionMinutesFailure * 60 * 1000);
 
 }
 
@@ -459,6 +457,7 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
       };
 
     }
+    await kycVaultStorage.deleteObject(storageKey);
 
     session.ocr = {
 
@@ -562,15 +561,7 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
 
   if (!consistency.accepted) {
 
-    session.ocr = {
-
-      ...session.ocr,
-
-      backImageKey: storageKey,
-
-      backUploadedAt: new Date(),
-
-    };
+    await kycVaultStorage.deleteObject(storageKey);
 
     await failSession(session, consistency.rejectReason, consistency.code);
 

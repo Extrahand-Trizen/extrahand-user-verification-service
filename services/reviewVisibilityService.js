@@ -14,6 +14,8 @@ const Verification = require('../models/Verification');
 
 const userService = require('./userService');
 
+const kycVaultStorage = require('./kycVaultStorage');
+
 const logger = require('../config/logger');
 
 const { redactForLog } = require('../utils/loggerRedaction');
@@ -278,7 +280,11 @@ async function promoteToVisibleFailed(session) {
 
 
 
-  // Failed OCR images are retained until ocrImagePurgeJob runs (see OCR_IMAGE_RETENTION_DAYS_FAILURE).
+  const keys = [updated.ocr?.frontImageKey, updated.ocr?.backImageKey].filter(Boolean);
+
+  await kycVaultStorage.deleteObjects(keys);
+
+
 
   logger.info('OCR lazy visibility: promoted to failed', redactForLog({
 
