@@ -430,23 +430,51 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
 
         frontUploadedAt: failedAt,
 
+        pendingFailureReason: validation.rejectReason,
+
+        pendingFailureCode: validation.code,
+
       };
 
-    } else {
+      session.internalStatus = 'awaiting_back';
 
-      session.ocr = {
+      session.status = 'awaiting_back';
 
-        ...session.ocr,
+      session.visibleStatus = 'pending';
 
-        backImageKey: storageKey,
+      await session.save();
 
-        backUploadedAt: failedAt,
+      return {
+
+        ...(await resolveAndBuildStatus(session)),
+
+        side: 'front',
+
+        softFailure: true,
+
+        code: validation.code,
+
+        failureReason: validation.rejectReason,
 
       };
 
     }
 
-    await failSession(session, validation.rejectReason, validation.code);
+    session.ocr = {
+
+      ...session.ocr,
+
+      backImageKey: storageKey,
+
+      backUploadedAt: failedAt,
+
+    };
+
+    const pendingReason = session.ocr?.pendingFailureReason || validation.rejectReason;
+
+    const pendingCode = session.ocr?.pendingFailureCode || validation.code;
+
+    await failSession(session, pendingReason, pendingCode);
 
     const refreshed = await KycSession.findByVerificationId(verificationId);
 
@@ -557,6 +585,52 @@ async function uploadSide(userId, verificationId, side, { buffer, mimetype, size
       softFailure: true,
 
       code: consistency.code,
+
+    };
+
+  }
+
+
+
+  if (session.ocr?.pendingFailureReason) {
+
+    session.ocr = {
+
+      ...session.ocr,
+
+      backImageKey: storageKey,
+
+      backUploadedAt: now,
+
+      backOcrAt: now,
+
+      cashfreeVerificationIdBack: cfVerificationId,
+
+      backExtracted: sideExtracted,
+
+    };
+
+    await session.save();
+
+    const pendingReason = session.ocr.pendingFailureReason;
+
+    const pendingCode = session.ocr.pendingFailureCode;
+
+    await failSession(session, pendingReason, pendingCode);
+
+    const refreshed = await KycSession.findByVerificationId(verificationId);
+
+    return {
+
+      ...(await resolveAndBuildStatus(refreshed)),
+
+      side: 'back',
+
+      softFailure: true,
+
+      code: pendingCode,
+
+      failureReason: pendingReason,
 
     };
 
