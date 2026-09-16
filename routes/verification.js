@@ -494,6 +494,12 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     const userId = req.headers['x-user-id'] || req.body.userId;
     const { panNumber, name, consent } = req.body;
 
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📥 [USER VERIFICATION SERVICE] Received PAN Verification Request');
+    console.log(`📍 User ID: ${userId || 'N/A'}`);
+    console.log(`📍 PAN Number: ${panNumber ? (panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4)) : 'N/A'}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
     if (!userId) {
       return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
     }
