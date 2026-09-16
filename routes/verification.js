@@ -9,7 +9,7 @@ const { finalizeDigilockerSession } = require('../services/digilockerCompletionS
 const { assertNoActiveOcrSession } = require('../services/sessionExclusionService');
 const { serviceAuthMiddleware } = require('../middleware/auth');
 const userService = require('../services/userService');
-const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar } = require('../utils/validation');
+const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar, isValidGstinFormat, cleanGstinNumber, maskGSTIN } = require('../utils/validation');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
 const axios = require('axios');
@@ -21,6 +21,7 @@ const FEATURES = {
   AADHAAR: process.env.FEATURE_AADHAAR !== 'false', // ✅ ENABLED by default
   AADHAAR_OCR: process.env.FEATURE_AADHAAR_OCR === 'true',
   PAN: process.env.FEATURE_PAN === 'true',          // 🔒 DISABLED (ready to enable)
+  GSTIN: process.env.FEATURE_GSTIN !== 'false',     // ✅ ENABLED by default
   BANK: process.env.FEATURE_BANK === 'true',        // 🔒 DISABLED (ready to enable)
   FACE: process.env.FEATURE_FACE === 'true',        // 🔒 DISABLED (ready to enable)
   LIVENESS: process.env.FEATURE_LIVENESS === 'true', // 🔒 DISABLED (ready to enable)
@@ -774,6 +775,238 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     }
     
     res.status(500).json(errorResponseObj);
+  }
+});
+
+/**
+ * POST /api/v1/verification/gstin/verify
+ * Verify GSTIN number - Cashfree Verification Suite
+ */
+router.post('/gstin/verify', serviceAuthMiddleware, async (req, res) => {
+  if (!FEATURES.GSTIN) {
+    return res.status(503).json({
+      success: false,
+      message: 'GSTIN verification is not yet available. Contact admin to enable this feature.',
+      code: 'FEATURE_NOT_ENABLED',
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  try {
+    const userId = req.headers['x-user-id'] || req.body.userId;
+    const { gstin, businessName, consent } = req.body;
+
+    if (!userId) {
+      return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
+    }
+
+    if (!gstin) {
+      return res.status(400).json(errorResponse('Missing required field: gstin', 'GSTIN is required'));
+    }
+
+    if (!consent?.given) {
+      return res.status(400).json(errorResponse('Consent required', 'User consent is required for GSTIN verification'));
+    }
+
+    // Clean and validate GSTIN format
+    const cleanedGstin = cleanGstinNumber(gstin);
+    if (!isValidGstinFormat(cleanedGstin)) {
+      return res.status(400).json(errorResponse('Invalid GSTIN format', 'GSTIN must be a 15-character valid Indian GSTIN'));
+    }
+
+    const maskedGSTIN = maskGSTIN(cleanedGstin);
+    logger.info('🔄 Verifying GSTIN', { userId, maskedGSTIN });
+
+    // Check if GSTIN is already verified for this user
+    const existingVerification = await Verification.findOne({
+      userId,
+      type: 'gstin',
+      status: 'verified'
+    });
+
+    if (existingVerification && existingVerification.maskedGSTIN === maskedGSTIN) {
+      logger.info('✅ GSTIN already verified for user', { userId, verificationId: existingVerification._id });
+      return res.json(successResponse({
+        verificationId: existingVerification._id,
+        maskedGSTIN: existingVerification.maskedGSTIN,
+        verifiedData: {
+          legalName: existingVerification.verifiedData?.legalName,
+          tradeName: existingVerification.verifiedData?.tradeName,
+          status: existingVerification.verifiedData?.gstinStatus || 'Active',
+          taxpayerType: existingVerification.verifiedData?.taxpayerType,
+          registrationDate: existingVerification.verifiedData?.registrationDate,
+          stateCode: existingVerification.verifiedData?.stateCode
+        },
+        status: 'verified',
+        alreadyVerified: true
+      }, 'GSTIN is already verified'));
+    }
+
+    // Get verification provider
+    const provider = getVerificationProvider(process.env);
+    
+    if (!provider || typeof provider.verifyGSTIN !== 'function') {
+      logger.error('❌ Provider does not support GSTIN verification', {
+        provider: provider?.constructor?.name || 'unknown',
+        hasVerifyGSTIN: typeof provider?.verifyGSTIN === 'function'
+      });
+      return res.status(503).json(errorResponse(
+        'GSTIN verification not supported by current provider',
+        'GSTIN verification is not available with the current verification provider. Please contact support.',
+        'PROVIDER_NOT_SUPPORTED'
+      ));
+    }
+
+    logger.info('🔄 Calling provider.verifyGSTIN', {
+      provider: provider.constructor?.name || 'unknown',
+      maskedGSTIN
+    });
+
+    let result;
+    try {
+      result = await provider.verifyGSTIN(cleanedGstin, businessName);
+      logger.info('✅ Provider returned result', {
+        success: result?.success,
+        hasData: !!result?.data
+      });
+    } catch (providerError) {
+      logger.error('❌ Provider.verifyGSTIN threw error', {
+        error: providerError.message,
+        status: providerError.statusCode ?? providerError.response?.status,
+        response: providerError.response?.data
+      });
+      const status = providerError.statusCode ?? providerError.response?.status ?? 500;
+      const message = providerError.response?.data?.message ?? providerError.message ?? 'GSTIN verification failed';
+      return res.status(status).json(errorResponse(message, message));
+    }
+
+    const now = new Date();
+    let verification = await Verification.findOne({
+      userId,
+      type: 'gstin'
+    });
+
+    const cashfreeReferenceId = result.data?.referenceId ?? result.data?.reference_id;
+
+    if (verification) {
+      verification.status = result.success ? 'verified' : 'failed';
+      verification.maskedGSTIN = result.data?.maskedGSTIN || maskedGSTIN;
+      verification.verifiedData = {
+        legalName: result.data?.legalName,
+        tradeName: result.data?.tradeName,
+        gstin: result.data?.gstin || cleanedGstin,
+        gstinStatus: result.data?.status || (result.success ? 'Active' : 'Invalid'),
+        taxpayerType: result.data?.taxpayerType,
+        registrationDate: result.data?.registrationDate,
+        stateCode: result.data?.stateCode
+      };
+      if (cashfreeReferenceId != null) verification.refId = String(cashfreeReferenceId);
+      verification.verifiedAt = result.success ? now : null;
+      verification.failedAt = result.success ? null : now;
+      verification.failureReason = result.success ? null : result.message;
+      verification.auditLog.push({
+        action: result.success ? 'reverified' : 'retry_failed',
+        performedBy: userId,
+        performedAt: now,
+        ipAddress: getClientIp(req),
+        metadata: {
+          provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+          environment: process.env.CASHFREE_ENV || 'sandbox',
+          ...(cashfreeReferenceId != null && { referenceId: cashfreeReferenceId })
+        }
+      });
+      await verification.save();
+    } else {
+      verification = await Verification.create({
+        userId,
+        type: 'gstin',
+        status: result.success ? 'verified' : 'failed',
+        provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+        refId: cashfreeReferenceId != null ? String(cashfreeReferenceId) : undefined,
+        maskedGSTIN: result.data?.maskedGSTIN || maskedGSTIN,
+        verifiedData: {
+          legalName: result.data?.legalName,
+          tradeName: result.data?.tradeName,
+          gstin: result.data?.gstin || cleanedGstin,
+          gstinStatus: result.data?.status || (result.success ? 'Active' : 'Invalid'),
+          taxpayerType: result.data?.taxpayerType,
+          registrationDate: result.data?.registrationDate,
+          stateCode: result.data?.stateCode
+        },
+        consent: {
+          given: true,
+          givenAt: now,
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          consentVersion: consent.version || 'v1.0',
+          consentText: consent.text || 'User consented to GSTIN verification'
+        },
+        auditLog: [{
+          action: 'verified',
+          performedBy: userId,
+          performedAt: now,
+          ipAddress: getClientIp(req),
+          metadata: {
+            provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+            environment: process.env.CASHFREE_ENV || 'sandbox',
+            ...(cashfreeReferenceId != null && { referenceId: cashfreeReferenceId })
+          }
+        }],
+        verifiedAt: result.success ? now : null,
+        failedAt: result.success ? null : now,
+        failureReason: result.success ? null : result.message,
+        metadata: {
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          environment: process.env.CASHFREE_ENV || 'sandbox'
+        }
+      });
+    }
+
+    logger.info('✅ GSTIN verification completed', {
+      userId,
+      verificationId: verification._id,
+      status: verification.status
+    });
+
+    res.json(successResponse({
+      verificationId: verification._id,
+      maskedGSTIN: verification.maskedGSTIN,
+      verifiedData: {
+        legalName: verification.verifiedData?.legalName,
+        tradeName: verification.verifiedData?.tradeName,
+        status: verification.verifiedData?.gstinStatus,
+        taxpayerType: verification.verifiedData?.taxpayerType,
+        registrationDate: verification.verifiedData?.registrationDate,
+        stateCode: verification.verifiedData?.stateCode
+      },
+      status: verification.status,
+      ...(verification.refId && { referenceId: verification.refId })
+    }, result.success ? 'GSTIN verified successfully' : 'GSTIN verification failed'));
+
+  } catch (error) {
+    logger.error('❌ GSTIN verification error', {
+      userId: req.headers['x-user-id'],
+      error: error.message,
+      stack: error.stack
+    });
+
+    let errorMessage = error.message || 'Failed to verify GSTIN';
+    let userMessage = 'An error occurred while verifying GSTIN';
+
+    if (error.message?.includes('Invalid GSTIN format')) {
+      userMessage = 'Invalid GSTIN format. Please check and try again.';
+      errorMessage = error.message;
+    } else if (error.response?.data) {
+      errorMessage = error.response.data.message || error.response.data.error || error.message;
+      userMessage = errorMessage;
+    }
+
+    res.status(500).json(errorResponse(
+      errorMessage,
+      userMessage,
+      error.code || 'GSTIN_VERIFICATION_ERROR'
+    ));
   }
 });
 

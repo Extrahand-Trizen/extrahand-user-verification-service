@@ -34,6 +34,10 @@ function getVerificationProvider(config) {
 
   logger.info(`🔧 Initializing verification provider: ${providerName}`);
   
+  if (providerName.toLowerCase() === 'mock' && (process.env.NODE_ENV === 'production' || config.NODE_ENV === 'production')) {
+    throw new Error('MockProvider is strictly forbidden in production environment');
+  }
+
   switch (providerName.toLowerCase()) {
     case 'mock':
       return new MockProvider(config);
@@ -89,12 +93,14 @@ function getProviderCapabilities(providerName) {
     mock: {
       aadhaar: true,
       pan: true,
+      gstin: true,
       bank: true,
       face: true,
     },
     cashfree: {
       aadhaar: true,
       pan: true,        // Ready but feature-flagged
+      gstin: true,      // Ready
       bank: true,       // Ready but feature-flagged
       face: false,      // Not supported by Cashfree
     },

@@ -9,7 +9,10 @@ const logger = require('../../config/logger');
  * and costs. Set VERIFICATION_PROVIDER=mock in .env
  */
 class MockProvider extends BaseVerificationProvider {
-  constructor(config) {
+  constructor(config = {}) {
+    if (process.env.NODE_ENV === 'production' || config.NODE_ENV === 'production') {
+      throw new Error('MockProvider cannot be initialized in production environment');
+    }
     super(config);
     this.providerName = 'mock';
     this.testOtp = '111000'; // Standard test OTP
@@ -23,6 +26,7 @@ class MockProvider extends BaseVerificationProvider {
 
   hasAadhaarSupport() { return true; }
   hasPANSupport() { return true; }
+  hasGSTINSupport() { return true; }
   hasBankSupport() { return true; }
   hasFaceSupport() { return true; }
 
@@ -159,29 +163,65 @@ class MockProvider extends BaseVerificationProvider {
   // PAN VERIFICATION (MOCK)
   // =====================================================
 
-  async verifyPAN(panNumber) {
+  async verifyPAN(panNumber, name) {
     logger.info('🎭 [MOCK] Verifying PAN', { pan: this.maskPAN(panNumber) });
     
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 300));
 
-    // Valid test PANs from Cashfree docs
-    const validPANs = ['ABCPV1234D', 'XYZP4321W', 'AZJPG7110R', 'ABCCD8000T', 'XYZH2000L', 'AAAHU4383C', 'AMJCL2021N'];
+    const cleanPan = String(panNumber || '').trim().toUpperCase();
+    if (!/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(cleanPan)) {
+      return {
+        success: false,
+        message: 'Invalid PAN format'
+      };
+    }
+
+    return {
+      success: true,
+      message: 'PAN verified successfully',
+      data: {
+        panNumber: this.maskPAN(cleanPan),
+        name: name || (cleanPan === 'NVRPK6324Q' ? 'PAVAN KUMAR' : 'John Doe'),
+        status: 'VALID'
+      }
+    };
+  }
+
+  // =====================================================
+  // GSTIN VERIFICATION (MOCK)
+  // =====================================================
+
+  async verifyGSTIN(gstin, businessName) {
+    const cleanedGstin = String(gstin || '').replace(/[\s-]/g, '').trim().toUpperCase();
+    logger.info('🎭 [MOCK] Verifying GSTIN', { gstin: this.maskGSTIN(cleanedGstin) });
     
-    if (validPANs.includes(panNumber.toUpperCase())) {
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Valid test GSTINs
+    const validGSTINs = ['29AAICP2912R1ZR', '27AABCU9603R1ZN', '36AAACB8506M1ZP', '07AAAAA0000A1Z5'];
+
+    if (validGSTINs.includes(cleanedGstin)) {
       return {
         success: true,
-        message: 'PAN verified successfully',
+        message: 'GSTIN verified successfully',
         data: {
-          panNumber: this.maskPAN(panNumber),
-          name: 'John Doe',
-          status: 'VALID'
+          gstin: cleanedGstin,
+          maskedGSTIN: this.maskGSTIN(cleanedGstin),
+          legalName: businessName || 'MOCK TECH SOLUTIONS PRIVATE LIMITED',
+          tradeName: businessName || 'MOCK STORE',
+          status: 'Active',
+          taxpayerType: 'Regular',
+          registrationDate: '01/07/2017',
+          stateCode: cleanedGstin.substring(0, 2),
+          referenceId: 'MOCK_GSTIN_' + Date.now()
         }
       };
     }
 
     return {
       success: false,
-      message: 'Invalid PAN number'
+      message: 'Invalid GSTIN number',
+      data: null
     };
   }
 

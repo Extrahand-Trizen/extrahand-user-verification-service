@@ -16,9 +16,10 @@ const VerificationSchema = new Schema({
       // ACTIVE NOW
       'aadhaar',
       'email',
+      'pan',
+      'gstin',
       
       // READY FOR FUTURE (feature flags)
-      'pan',
       'bank_account',
       'driving_license',
       'face_match',
@@ -104,12 +105,20 @@ const VerificationSchema = new Schema({
   
   // ===== FUTURE FIELDS (READY BUT UNUSED NOW) =====
   maskedPAN: String, // Format: ABXXX1234F
+  maskedGSTIN: String, // Format: 29XXXXXXXXX1ZR
   maskedBankAccount: String, // Format: XXXX1234
   maskedDrivingLicense: String,
   
   // ===== VERIFIED DATA (MASKED/ENCRYPTED) =====
   verifiedData: {
     name: String,
+    legalName: String,
+    tradeName: String,
+    gstin: String,
+    gstinStatus: String,
+    taxpayerType: String,
+    registrationDate: String,
+    stateCode: String,
     /** Full date of birth from OCR/QR (e.g. YYYY-MM-DD or DD-MM-YYYY as returned by provider) */
     dob: String,
     yearOfBirth: String,

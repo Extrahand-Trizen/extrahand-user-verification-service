@@ -58,6 +58,20 @@ class BaseVerificationProvider {
   }
 
   // =====================================================
+  // GSTIN VERIFICATION
+  // =====================================================
+
+  /**
+   * Verify GSTIN number
+   * @param {string} gstin - 15-character GSTIN
+   * @param {string} [businessName] - Optional business name to match
+   * @returns {Promise<{success: boolean, data?: object, message?: string}>}
+   */
+  async verifyGSTIN(gstin, businessName) {
+    throw new Error(`${this.providerName}: GSTIN verification not supported`);
+  }
+
+  // =====================================================
   // BANK VERIFICATION (FUTURE - READY TO ENABLE)
   // =====================================================
 
@@ -183,6 +197,18 @@ class BaseVerificationProvider {
   }
 
   /**
+   * Mask GSTIN number (format: 29XXXXXXXXX1ZR)
+   * @param {string} gstin - 15-character GSTIN
+   * @returns {string} Masked GSTIN
+   */
+  maskGSTIN(gstin) {
+    if (!gstin || gstin.length !== 15) {
+      return 'XXXXXXXXXXXXXXX';
+    }
+    return `${gstin.slice(0, 2)}XXXXXXXXX${gstin.slice(-4)}`;
+  }
+
+  /**
    * Mask bank account number (format: XXXX1234)
    * @param {string} accountNumber - Bank account number
    * @returns {string} Masked account number
@@ -204,6 +230,7 @@ class BaseVerificationProvider {
       capabilities: {
         aadhaar: this.hasAadhaarSupport(),
         pan: this.hasPANSupport(),
+        gstin: this.hasGSTINSupport(),
         bank: this.hasBankSupport(),
         face: this.hasFaceSupport(),
       },
@@ -213,6 +240,7 @@ class BaseVerificationProvider {
   // Capability checks (override in child classes)
   hasAadhaarSupport() { return false; }
   hasPANSupport() { return false; }
+  hasGSTINSupport() { return false; }
   hasBankSupport() { return false; }
   hasFaceSupport() { return false; }
 }

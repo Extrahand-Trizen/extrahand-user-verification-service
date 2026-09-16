@@ -40,6 +40,7 @@ class CashfreeProvider extends BaseVerificationProvider {
 
   hasAadhaarSupport() { return true; }
   hasPANSupport() { return true; }
+  hasGSTINSupport() { return true; }
   hasBankSupport() { return true; }
   hasFaceSupport() { return false; } // Cashfree doesn't support face verification
 
@@ -446,14 +447,14 @@ class CashfreeProvider extends BaseVerificationProvider {
 
     // In sandbox mode, use test data
     if (this.isSandbox()) {
-      const validPANs = ['ABCPV1234D', 'XYZP4321W', 'AZJPG7110R', 'ABCCD8000T', 'XYZH2000L', 'AAAHU4383C', 'AMJCL2021N'];
-      const isValid = validPANs.includes(panNumber);
+      const validPANs = ['ABCPV1234D', 'XYZP4321W', 'AZJPG7110R', 'ABCCD8000T', 'XYZH2000L', 'AAAHU4383C', 'AMJCL2021N', 'NVRPK6324Q'];
+      const isValid = validPANs.includes(panNumber) || /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(panNumber);
 
       if (isValid) {
         return {
           success: true,
           data: {
-            name: 'JOHN DOE',
+            name: name || (panNumber === 'NVRPK6324Q' ? 'PAVAN KUMAR' : 'JOHN DOE'),
             panNumber: panNumber,
             maskedPAN: this.maskPAN(panNumber),
             status: 'VALID',
@@ -510,6 +511,114 @@ class CashfreeProvider extends BaseVerificationProvider {
       );
     } catch (error) {
       logger.error('❌ [Cashfree] PAN verification error', {
+        error: error.message,
+        status: error.statusCode || error.response?.status,
+        response: error.response?.data
+      });
+      throw error;
+    }
+  }
+
+  // =====================================================
+  // GSTIN VERIFICATION (PRODUCTION - CASHFREE /gstin)
+  // =====================================================
+
+  /**
+   * Verify GSTIN (Cashfree Verification Suite - live/sandbox)
+   * @param {string} gstin - 15-character GSTIN (e.g., 29AAICP2912R1ZR)
+   * @param {string} [businessName] - Optional business/trade name for matching
+   * @returns {Promise<{success: boolean, data?: object, message?: string}>}
+   */
+  async verifyGSTIN(gstin, businessName) {
+    const cleanedGstin = String(gstin || '').replace(/[\s-]/g, '').trim().toUpperCase();
+    if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(cleanedGstin)) {
+      throw new Error('Invalid GSTIN format');
+    }
+
+    logger.info('🔄 [Cashfree] Verifying GSTIN', {
+      gstin: this.maskGSTIN(cleanedGstin),
+      environment: this.environment
+    });
+
+    // In sandbox mode, use test data
+    if (this.isSandbox()) {
+      const validGSTINs = ['29AAICP2912R1ZR', '27AABCU9603R1ZN', '36AAACB8506M1ZP', '07AAAAA0000A1Z5'];
+      const isValid = validGSTINs.includes(cleanedGstin);
+
+      if (isValid) {
+        return {
+          success: true,
+          data: {
+            gstin: cleanedGstin,
+            legalName: businessName || 'EXTRAHAND ENTERPRISES PRIVATE LIMITED',
+            tradeName: businessName || 'EXTRAHAND STORE',
+            status: 'Active',
+            taxpayerType: 'Regular',
+            registrationDate: '01/07/2017',
+            stateCode: cleanedGstin.substring(0, 2),
+            maskedGSTIN: this.maskGSTIN(cleanedGstin),
+            referenceId: 162
+          }
+        };
+      }
+      return {
+        success: false,
+        message: 'Invalid GSTIN number',
+        data: null
+      };
+    }
+
+    // Production: Call Cashfree Verify GSTIN API (POST /gstin) with retry for 429/5xx
+    const body = {
+      GSTIN: cleanedGstin
+    };
+    if (businessName && String(businessName).trim()) {
+      body.business_name = String(businessName).trim();
+    }
+
+    try {
+      return await retryWithBackoff(
+        async () => {
+          const response = await axios.post(
+            `${this.baseUrl}/gstin`,
+            body,
+            { headers: this.getPanHeaders(), timeout: 30000 }
+          );
+
+          const data = response.data;
+          const valid = data.valid === true || data.status === 'VALID' || (data.gstin_status && data.gstin_status.toLowerCase() === 'active');
+
+          if (!valid) {
+            return {
+              success: false,
+              message: data.message || 'Invalid GSTIN',
+              data: null
+            };
+          }
+
+          const legalName = data.legal_name || data.registered_name || data.business_name || data.trade_name;
+          const tradeName = data.trade_name || data.business_name || legalName;
+
+          return {
+            success: true,
+            data: {
+              gstin: data.gstin || data.GSTIN || cleanedGstin,
+              legalName: legalName || '—',
+              tradeName: tradeName || '—',
+              status: data.gstin_status || data.status || 'Active',
+              taxpayerType: data.taxpayer_type,
+              registrationDate: data.registration_date,
+              stateCode: data.state_code || cleanedGstin.substring(0, 2),
+              address: data.principal_place_address || data.address,
+              maskedGSTIN: this.maskGSTIN(data.gstin || cleanedGstin),
+              referenceId: data.reference_id || data.verification_id
+            }
+          };
+        },
+        { maxRetries: 3, initialDelay: 1000, backoffMultiplier: 2 }
+      );
+    } catch (error) {
+      logger.error('❌ [Cashfree] GSTIN verification error', {
         error: error.message,
         status: error.statusCode || error.response?.status,
         response: error.response?.data
