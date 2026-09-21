@@ -636,7 +636,7 @@ class CashfreeProvider extends BaseVerificationProvider {
    * @param {string} accountNumber - Bank account number
    * @param {string} ifsc - IFSC code
    * @param {string} accountHolderName - Account holder name (optional, for name matching)
-   * @returns {Promise<{success: boolean, data?: object}>}
+   * @returns {Promise<{success: boolean, data?: object, message?: string}>}
    */
   async verifyBankAccount(accountNumber, ifsc, accountHolderName) {
     logger.info('🔄 [Cashfree] Verifying Bank Account', {
@@ -665,13 +665,14 @@ class CashfreeProvider extends BaseVerificationProvider {
         return {
           success: true,
           data: {
-            accountHolderName: accountInfo.name,
+            accountHolderName: accountHolderName || accountInfo.name,
             accountNumber: accountNumber,
             maskedBankAccount: this.maskBankAccount(accountNumber),
             ifsc: ifsc,
             bankName: accountInfo.bank,
             branch: accountInfo.branch,
             status: 'VALID',
+            referenceId: 'sandbox_' + Date.now(),
           }
         };
       } else {
@@ -683,34 +684,115 @@ class CashfreeProvider extends BaseVerificationProvider {
       }
     }
 
-    // Production: Call actual Cashfree API
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}/bank-account/verify`,
-        {
-          account_number: accountNumber,
-          ifsc_code: ifsc
-        },
-        { headers: this.getHeaders(), timeout: 30000 }
-      );
+    // Production: Call actual Cashfree API with retry logic
+    const body = {
+      bank_account: accountNumber,
+      account_number: accountNumber,
+      ifsc: ifsc,
+      ifsc_code: ifsc,
+    };
+    if (accountHolderName && String(accountHolderName).trim()) {
+      body.name = String(accountHolderName).trim();
+    }
 
-      return {
-        success: true,
-        data: {
-          accountNumber: response.data.account_number,
-          maskedBankAccount: this.maskBankAccount(accountNumber),
-          accountHolderName: response.data.account_holder_name,
-          ifsc: response.data.ifsc,
-          bankName: response.data.bank_name,
-          status: response.data.status,
-        }
-      };
+    try {
+      return await retryWithBackoff(
+        async () => {
+          let response;
+          try {
+            // Attempt V2 endpoint first: /bank-account/sync
+            response = await axios.post(
+              `${this.baseUrl}/bank-account/sync`,
+              body,
+              { headers: this.getHeaders(), timeout: 30000 }
+            );
+          } catch (v2Error) {
+            // Fallback to /bank-account/verify if /bank-account/sync returns 404
+            if (v2Error.response?.status === 404) {
+              logger.warn('🔄 [Cashfree] /bank-account/sync 404, falling back to /bank-account/verify');
+              response = await axios.post(
+                `${this.baseUrl}/bank-account/verify`,
+                body,
+                { headers: this.getHeaders(), timeout: 30000 }
+              );
+            } else {
+              throw v2Error;
+            }
+          }
+
+          const resData = response.data?.data || response.data || {};
+          const statusValue = (
+            resData.account_status ||
+            resData.accountStatus ||
+            resData.account_status_code ||
+            resData.accountStatusCode ||
+            resData.status ||
+            response.data?.status ||
+            ''
+          ).toUpperCase();
+          const isValid =
+            statusValue === 'VALID' ||
+            statusValue === 'ACCOUNT_IS_VALID' ||
+            statusValue === 'SUCCESS' ||
+            resData.accountExists === 'YES' ||
+            resData.account_exists === 'YES';
+
+          if (!isValid) {
+            return {
+              success: false,
+              message: response.data?.message || resData.message || 'Bank account is invalid or does not exist',
+              data: null
+            };
+          }
+
+          const verifiedName =
+            resData.name_at_bank ||
+            resData.nameAtBank ||
+            resData.account_holder_name ||
+            resData.accountHolderName ||
+            accountHolderName;
+          const verifiedBankName =
+            resData.bank_name ||
+            resData.bankName ||
+            resData.ifsc_details?.bank;
+          const refId =
+            resData.reference_id ||
+            resData.bvRefId ||
+            resData.refId ||
+            response.data?.reference_id ||
+            response.data?.subCode;
+
+          return {
+            success: true,
+            data: {
+              accountNumber: resData.bank_account || resData.bankAccount || resData.account_number || accountNumber,
+              maskedBankAccount: this.maskBankAccount(accountNumber),
+              accountHolderName: verifiedName,
+              ifsc: resData.ifsc || resData.ifsc_code || resData.ifsc_details?.ifsc || ifsc,
+              bankName: verifiedBankName,
+              branch: resData.branch || resData.ifsc_details?.branch,
+              city: resData.city || resData.ifsc_details?.city,
+              status: 'VALID',
+              nameMatchScore: resData.name_match_score || resData.nameMatchScore,
+              nameMatchResult: resData.name_match_result || resData.nameMatchResult,
+              referenceId: refId
+            }
+          };
+        },
+        { maxRetries: 3, initialDelay: 1000, backoffMultiplier: 2 }
+      );
     } catch (error) {
       logger.error('❌ [Cashfree] Bank verification error', {
         error: error.message,
+        status: error.response?.status,
         response: error.response?.data
       });
-      throw error;
+      const errorMsg = error.response?.data?.message || error.response?.data?.error || error.message || 'Bank account verification failed';
+      return {
+        success: false,
+        message: errorMsg,
+        data: null
+      };
     }
   }
 }

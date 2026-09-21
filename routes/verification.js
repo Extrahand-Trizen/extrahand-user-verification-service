@@ -1064,48 +1064,145 @@ router.post('/bank/verify', serviceAuthMiddleware, async (req, res) => {
     // Call provider to verify bank account
     const result = await provider.verifyBankAccount(accountNumber, ifsc, accountHolderName);
 
-    // Create verification record
     const now = new Date();
-    const verification = await Verification.create({
-      userId,
-      type: 'bank_account',
-      status: result.success ? 'verified' : 'failed',
-      provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-      maskedBankAccount: result.data?.maskedBankAccount || ('XXXX' + accountNumber.slice(-4)),
-      verifiedData: { 
+    let verification = await Verification.findOne({ userId, type: 'bank_account' });
+
+    if (!result.success) {
+      if (verification) {
+        verification.status = 'failed';
+        verification.provider = process.env.VERIFICATION_PROVIDER || 'cashfree';
+        verification.maskedBankAccount = 'XXXX' + accountNumber.slice(-4);
+        verification.failureReason = result.message || 'Bank account verification failed';
+        verification.failedAt = now;
+        verification.auditLog.push({
+          action: 'retry_failed',
+          performedBy: userId,
+          performedAt: now,
+          ipAddress: getClientIp(req),
+          metadata: {
+            provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+            environment: process.env.CASHFREE_ENV || 'sandbox'
+          }
+        });
+        await verification.save().catch(err => logger.warn('Could not update failed bank verification record', { error: err.message }));
+      } else {
+        await Verification.create({
+          userId,
+          type: 'bank_account',
+          status: 'failed',
+          provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+          maskedBankAccount: 'XXXX' + accountNumber.slice(-4),
+          failureReason: result.message || 'Bank account verification failed',
+          failedAt: now,
+          auditLog: [{
+            action: 'failed',
+            performedBy: userId,
+            performedAt: now,
+            ipAddress: getClientIp(req),
+            metadata: {
+              provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+              environment: process.env.CASHFREE_ENV || 'sandbox'
+            }
+          }]
+        }).catch(err => logger.warn('Could not save failed bank verification record', { error: err.message }));
+      }
+
+      return res.status(400).json(errorResponse(
+        result.message || 'Bank account verification failed',
+        result.message || 'Invalid bank account or IFSC code',
+        'BANK_VERIFICATION_FAILED'
+      ));
+    }
+
+    // Success - Create or update verification record
+    if (verification) {
+      verification.status = 'verified';
+      verification.provider = process.env.VERIFICATION_PROVIDER || 'cashfree';
+      verification.refId = result.data?.referenceId ? String(result.data.referenceId) : undefined;
+      verification.maskedBankAccount = result.data?.maskedBankAccount || ('XXXX' + accountNumber.slice(-4));
+      verification.verifiedData = { 
+        name: result.data?.accountHolderName || accountHolderName,
         accountHolderName: result.data?.accountHolderName || accountHolderName,
-        ifsc: ifsc,
+        ifsc: result.data?.ifsc || ifsc,
         bankName: result.data?.bankName,
         branch: result.data?.branch,
-        status: result.data?.status
-      },
-      consent: {
+        status: result.data?.status || 'VALID',
+        nameMatchScore: result.data?.nameMatchScore,
+        nameMatchResult: result.data?.nameMatchResult,
+      };
+      verification.consent = {
         given: true,
         givenAt: now,
         ipAddress: getClientIp(req),
         userAgent: req.get('user-agent') || 'unknown',
         consentVersion: consent.version || 'v1.0',
         consentText: consent.text || 'User consented to bank account verification'
-      },
-      auditLog: [{
-        action: 'verified',
+      };
+      verification.auditLog.push({
+        action: 'reverified',
         performedBy: userId,
         performedAt: now,
         ipAddress: getClientIp(req),
         metadata: {
           provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-          environment: process.env.CASHFREE_ENV || 'sandbox'
+          environment: process.env.CASHFREE_ENV || 'sandbox',
+          ...(result.data?.referenceId && { referenceId: result.data.referenceId })
         }
-      }],
-      verifiedAt: result.success ? now : null,
-      failedAt: result.success ? null : now,
-      failureReason: result.success ? null : result.message,
-      metadata: {
+      });
+      verification.verifiedAt = now;
+      verification.failedAt = null;
+      verification.failureReason = null;
+      verification.metadata = {
         ipAddress: getClientIp(req),
         userAgent: req.get('user-agent') || 'unknown',
         environment: process.env.CASHFREE_ENV || 'sandbox'
-      }
-    });
+      };
+      await verification.save();
+    } else {
+      verification = await Verification.create({
+        userId,
+        type: 'bank_account',
+        status: 'verified',
+        provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+        refId: result.data?.referenceId ? String(result.data.referenceId) : undefined,
+        maskedBankAccount: result.data?.maskedBankAccount || ('XXXX' + accountNumber.slice(-4)),
+        verifiedData: { 
+          name: result.data?.accountHolderName || accountHolderName,
+          accountHolderName: result.data?.accountHolderName || accountHolderName,
+          ifsc: result.data?.ifsc || ifsc,
+          bankName: result.data?.bankName,
+          branch: result.data?.branch,
+          status: result.data?.status || 'VALID',
+          nameMatchScore: result.data?.nameMatchScore,
+          nameMatchResult: result.data?.nameMatchResult,
+        },
+        consent: {
+          given: true,
+          givenAt: now,
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          consentVersion: consent.version || 'v1.0',
+          consentText: consent.text || 'User consented to bank account verification'
+        },
+        auditLog: [{
+          action: 'verified',
+          performedBy: userId,
+          performedAt: now,
+          ipAddress: getClientIp(req),
+          metadata: {
+            provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+            environment: process.env.CASHFREE_ENV || 'sandbox',
+            ...(result.data?.referenceId && { referenceId: result.data.referenceId })
+          }
+        }],
+        verifiedAt: now,
+        metadata: {
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          environment: process.env.CASHFREE_ENV || 'sandbox'
+        }
+      });
+    }
 
     logger.info('✅ Bank account verification completed', { 
       userId, 
@@ -1114,67 +1211,19 @@ router.post('/bank/verify', serviceAuthMiddleware, async (req, res) => {
     });
 
     // ✨ Update User Service with bank verification status
-    logger.info('📞 [VERIFICATION → USER SERVICE] Calling User Service to update bank verification status', {
-      userId,
-      maskedBankAccount: verification.maskedBankAccount,
-      verifiedData: verification.verifiedData
-    });
-    
-    console.log('🔍 [DEBUG] Verification data before user-service call:', {
-      'verification.verifiedData': verification.verifiedData,
-      'verification.verifiedData.accountHolderName': verification.verifiedData?.accountHolderName,
-      'verification.verifiedData.bankName': verification.verifiedData?.bankName,
-      'verification.verifiedData.ifsc': verification.verifiedData?.ifsc
-    });
-    
     try {
-      console.log('🔍 [DEBUG] About to call userService.updateBankVerificationStatus', {
-        userId,
-        USER_SERVICE_URL: process.env.USER_SERVICE_URL,
-        SERVICE_AUTH_TOKEN_PRESENT: !!process.env.SERVICE_AUTH_TOKEN,
-        verificationData: {
-          isBankVerified: true,
-          bankVerifiedAt: new Date().toISOString(),
-          maskedBankAccount: verification.maskedBankAccount,
-          bankAccount: {
-            accountHolderName: verification.verifiedData?.accountHolderName,
-            bankName: verification.verifiedData?.bankName,
-            ifsc: verification.verifiedData?.ifsc
-          }
-        }
-      });
-      
-      const userServiceUpdate = await userService.updateBankVerificationStatus(userId, {
+      await userService.updateBankVerificationStatus(userId, {
         isBankVerified: true,
-        bankVerifiedAt: new Date().toISOString(),
+        bankVerifiedAt: now.toISOString(),
         maskedBankAccount: verification.maskedBankAccount,
         bankAccount: {
           accountHolderName: verification.verifiedData?.accountHolderName,
           bankName: verification.verifiedData?.bankName,
           ifsc: verification.verifiedData?.ifsc
         }
-      });
-
-      if (userServiceUpdate.success) {
-        logger.info('✅ [VERIFICATION → USER SERVICE] User Service updated with bank verification', { 
-          userId,
-          responseData: userServiceUpdate.data
-        });
-      } else {
-        logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to update User Service, but verification succeeded', {
-          userId,
-          error: userServiceUpdate.error,
-          status: userServiceUpdate.status
-        });
-      }
-    } catch (updateError) {
-      // Log but don't fail the verification response
-      logger.error('❌ [VERIFICATION → USER SERVICE] Error updating User Service (non-blocking)', {
-        userId,
-        error: updateError.message,
-        stack: updateError.stack,
-        note: 'Bank verification succeeded but profile update failed'
-      });
+      }).catch(err => logger.warn('User Service bank sync non-blocking error', { error: err.message }));
+    } catch (e) {
+      // Non-blocking
     }
 
     res.json(successResponse({
@@ -1185,6 +1234,7 @@ router.post('/bank/verify', serviceAuthMiddleware, async (req, res) => {
         bankName: verification.verifiedData?.bankName,
         ifsc: verification.verifiedData?.ifsc
       },
+      referenceId: result.data?.referenceId,
       status: verification.status
     }, 'Bank account verified successfully'));
 

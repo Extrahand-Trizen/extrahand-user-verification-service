@@ -132,6 +132,14 @@ const VerificationSchema = new Schema({
     },
     mobileHash: String,
     photoLink: String,
+    // Bank verification fields
+    accountHolderName: String,
+    bankName: String,
+    branch: String,
+    ifsc: String,
+    status: String,
+    nameMatchScore: Number,
+    nameMatchResult: String,
   },
   
   // ===== OTP FIELDS (for Aadhaar/OTP-based verification) =====
