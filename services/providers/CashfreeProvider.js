@@ -451,10 +451,19 @@ class CashfreeProvider extends BaseVerificationProvider {
       const isValid = validPANs.includes(panNumber) || /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(panNumber);
 
       if (isValid) {
+        const panNameMap = {
+          'NVRPK6324Q': 'PAVAN KUMAR',
+          'ABCPV1234D': 'VIKRAM SHARMA',
+          'XYZP4321W': 'ANITA SINGH',
+          'AZJPG7110R': 'RAJESH VERMA',
+          'ABCCD8000T': 'SURESH PATEL',
+        };
+        const verifiedName = panNameMap[panNumber] || (name && !name.toLowerCase().includes('draft') && !name.toLowerCase().includes('seller') ? name : 'PAN CARD HOLDER');
+
         return {
           success: true,
           data: {
-            name: name || (panNumber === 'NVRPK6324Q' ? 'PAVAN KUMAR' : 'JOHN DOE'),
+            name: verifiedName,
             panNumber: panNumber,
             maskedPAN: this.maskPAN(panNumber),
             status: 'VALID',

@@ -176,12 +176,22 @@ class MockProvider extends BaseVerificationProvider {
       };
     }
 
+    const panNameMap = {
+      'NVRPK6324Q': 'PAVAN KUMAR',
+      'ABCPV1234D': 'VIKRAM SHARMA',
+      'XYZP4321W': 'ANITA SINGH',
+      'AZJPG7110R': 'RAJESH VERMA',
+      'ABCCD8000T': 'SURESH PATEL',
+    };
+
+    const verifiedName = panNameMap[cleanPan] || (name && !name.toLowerCase().includes('draft') && !name.toLowerCase().includes('seller') ? name : 'PAN CARD HOLDER');
+
     return {
       success: true,
       message: 'PAN verified successfully',
       data: {
-        panNumber: this.maskPAN(cleanPan),
-        name: name || (cleanPan === 'NVRPK6324Q' ? 'PAVAN KUMAR' : 'John Doe'),
+        panNumber: cleanPan,
+        name: verifiedName,
         status: 'VALID'
       }
     };
