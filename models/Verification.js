@@ -112,6 +112,7 @@ const VerificationSchema = new Schema({
   // ===== VERIFIED DATA (MASKED/ENCRYPTED) =====
   verifiedData: {
     name: String,
+    panNumber: String,
     legalName: String,
     tradeName: String,
     gstin: String,

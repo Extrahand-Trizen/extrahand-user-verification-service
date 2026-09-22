@@ -523,7 +523,9 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     const existingVerification = await Verification.findOne({
       userId,
       type: 'pan',
-      status: 'verified'
+      status: 'verified',
+      'verifiedData.panNumber': panNumber,
+      'verifiedData.name': { $exists: true, $nin: [null, ''] },
     });
 
     if (existingVerification && (existingVerification.maskedPAN === maskedPAN || existingVerification.verifiedData?.panNumber === panNumber)) {
