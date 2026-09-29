@@ -43,6 +43,7 @@ const envSchema = z.object({
   // ===== FEATURE FLAGS =====
   FEATURE_AADHAAR: z.string().default('true'),
   FEATURE_PAN: z.string().default('false'),
+  FEATURE_GSTIN: z.string().default('true'),
   FEATURE_BANK: z.string().default('false'),
   FEATURE_FACE: z.string().default('false'),
   FEATURE_LIVENESS: z.string().default('false'),
@@ -186,8 +187,8 @@ function validateEnv() {
   try {
     const env = envSchema.parse(process.env);
 
-    if (isVerificationTestMode(env) && env.NODE_ENV === 'production') {
-      throw new Error('VERIFICATION_TEST_MODE cannot be enabled when NODE_ENV=production');
+    if ((isVerificationTestMode(env) || env.VERIFICATION_PROVIDER === 'mock') && env.NODE_ENV === 'production') {
+      throw new Error('VERIFICATION_TEST_MODE or MockProvider cannot be enabled when NODE_ENV=production');
     }
     
     // Validate MongoDB URI if provided
@@ -210,6 +211,7 @@ function validateEnv() {
     console.log('   Feature Flags:');
     console.log(`     - Aadhaar: ${env.FEATURE_AADHAAR === 'true' ? '✅ ENABLED' : '🔒 DISABLED'}`);
     console.log(`     - PAN: ${env.FEATURE_PAN === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);
+    console.log(`     - GSTIN: ${env.FEATURE_GSTIN === 'true' ? '✅ ENABLED' : '🔒 DISABLED'}`);
     console.log(`     - Bank: ${env.FEATURE_BANK === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);
     console.log(`     - Face: ${env.FEATURE_FACE === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);
     console.log(`     - Liveness: ${env.FEATURE_LIVENESS === 'true' ? '✅ ENABLED' : '🔒 DISABLED (ready)'}`);

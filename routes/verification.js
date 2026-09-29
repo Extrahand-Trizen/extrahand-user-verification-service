@@ -9,7 +9,7 @@ const { finalizeDigilockerSession } = require('../services/digilockerCompletionS
 const { assertNoActiveOcrSession } = require('../services/sessionExclusionService');
 const { serviceAuthMiddleware } = require('../middleware/auth');
 const userService = require('../services/userService');
-const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar } = require('../utils/validation');
+const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar, isValidGstinFormat, cleanGstinNumber, maskGSTIN } = require('../utils/validation');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
 const axios = require('axios');
@@ -21,6 +21,7 @@ const FEATURES = {
   AADHAAR: process.env.FEATURE_AADHAAR !== 'false', // ✅ ENABLED by default
   AADHAAR_OCR: process.env.FEATURE_AADHAAR_OCR === 'true',
   PAN: process.env.FEATURE_PAN === 'true',          // 🔒 DISABLED (ready to enable)
+  GSTIN: process.env.FEATURE_GSTIN !== 'false',     // ✅ ENABLED by default
   BANK: process.env.FEATURE_BANK === 'true',        // 🔒 DISABLED (ready to enable)
   DRIVING_LICENSE: process.env.FEATURE_DRIVING_LICENSE !== 'false',
   FACE: process.env.FEATURE_FACE === 'true',        // 🔒 DISABLED (ready to enable)
@@ -494,6 +495,12 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
     const userId = req.headers['x-user-id'] || req.body.userId;
     const { panNumber, name, consent } = req.body;
 
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📥 [USER VERIFICATION SERVICE] Received PAN Verification Request');
+    console.log(`📍 User ID: ${userId || 'N/A'}`);
+    console.log(`📍 PAN Number: ${panNumber ? (panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4)) : 'N/A'}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
     if (!userId) {
       return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
     }
@@ -511,57 +518,59 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
       return res.status(400).json(errorResponse('Invalid PAN format', 'PAN must be in format: ABCDE1234F'));
     }
 
-    logger.info('🔄 Verifying PAN', { userId, maskedPAN: panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4) });
+    const maskedPAN = panNumber.substring(0, 2) + 'XXX' + panNumber.slice(-4);
 
-    // ✨ NEW: Check if PAN is already verified for this user
+    // ✨ Check if this EXACT PAN is already verified for this user
     const existingVerification = await Verification.findOne({
       userId,
-    type: 'pan',
-    status: 'verified'
+      type: 'pan',
+      status: 'verified',
+      'verifiedData.panNumber': panNumber,
+      'verifiedData.name': { $exists: true, $nin: [null, ''] },
     });
 
-    if (existingVerification) {
-    logger.info('✅ PAN already verified for user', { userId, verificationId: existingVerification._id });
+    if (existingVerification && (existingVerification.maskedPAN === maskedPAN || existingVerification.verifiedData?.panNumber === panNumber)) {
+      logger.info('✅ PAN already verified for user', { userId, verificationId: existingVerification._id });
 
-    // ✅ Ensure User Service profile is also marked as PAN-verified (idempotent, non-blocking)
-    try {
-      const now = new Date().toISOString();
-      const updateResult = await userService.updatePANVerificationStatus(userId, {
-        isPANVerified: true,
-        panVerifiedAt: now,
-        maskedPAN: existingVerification.maskedPAN
-      });
-
-      if (updateResult.success) {
-        logger.info('✅ [VERIFICATION → USER SERVICE] Synced existing PAN verification to User Service profile', {
-          userId,
-          verificationId: existingVerification._id
+      // ✅ Ensure User Service profile is also marked as PAN-verified (idempotent, non-blocking)
+      try {
+        const now = new Date().toISOString();
+        const updateResult = await userService.updatePANVerificationStatus(userId, {
+          isPANVerified: true,
+          panVerifiedAt: now,
+          maskedPAN: existingVerification.maskedPAN
         });
-      } else {
-        logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to sync existing PAN verification to User Service (non-blocking)', {
+
+        if (updateResult.success) {
+          logger.info('✅ [VERIFICATION → USER SERVICE] Synced existing PAN verification to User Service profile', {
+            userId,
+            verificationId: existingVerification._id
+          });
+        } else {
+          logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to sync existing PAN verification to User Service (non-blocking)', {
+            userId,
+            verificationId: existingVerification._id,
+            error: updateResult.error,
+            status: updateResult.status
+          });
+        }
+      } catch (syncError) {
+        logger.error('❌ [VERIFICATION → USER SERVICE] Error syncing existing PAN verification (non-blocking)', {
           userId,
           verificationId: existingVerification._id,
-          error: updateResult.error,
-          status: updateResult.status
+          error: syncError.message
         });
       }
-    } catch (syncError) {
-      logger.error('❌ [VERIFICATION → USER SERVICE] Error syncing existing PAN verification (non-blocking)', {
-        userId,
-        verificationId: existingVerification._id,
-        error: syncError.message
-      });
-    }
 
-    return res.json(successResponse({
-      verificationId: existingVerification._id,
-      maskedPAN: existingVerification.maskedPAN,
-      verifiedData: {
-        name: existingVerification.verifiedData?.name
-      },
-      status: 'verified',
-      alreadyVerified: true
-    }, 'PAN is already verified'));
+      return res.json(successResponse({
+        verificationId: existingVerification._id,
+        maskedPAN: existingVerification.maskedPAN,
+        verifiedData: {
+          name: existingVerification.verifiedData?.name
+        },
+        status: 'verified',
+        alreadyVerified: true
+      }, 'PAN is already verified'));
     }
 
     // Get verification provider
@@ -779,6 +788,238 @@ router.post('/pan/verify', serviceAuthMiddleware, async (req, res) => {
 });
 
 /**
+ * POST /api/v1/verification/gstin/verify
+ * Verify GSTIN number - Cashfree Verification Suite
+ */
+router.post('/gstin/verify', serviceAuthMiddleware, async (req, res) => {
+  if (!FEATURES.GSTIN) {
+    return res.status(503).json({
+      success: false,
+      message: 'GSTIN verification is not yet available. Contact admin to enable this feature.',
+      code: 'FEATURE_NOT_ENABLED',
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  try {
+    const userId = req.headers['x-user-id'] || req.body.userId;
+    const { gstin, businessName, consent } = req.body;
+
+    if (!userId) {
+      return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
+    }
+
+    if (!gstin) {
+      return res.status(400).json(errorResponse('Missing required field: gstin', 'GSTIN is required'));
+    }
+
+    if (!consent?.given) {
+      return res.status(400).json(errorResponse('Consent required', 'User consent is required for GSTIN verification'));
+    }
+
+    // Clean and validate GSTIN format
+    const cleanedGstin = cleanGstinNumber(gstin);
+    if (!isValidGstinFormat(cleanedGstin)) {
+      return res.status(400).json(errorResponse('Invalid GSTIN format', 'GSTIN must be a 15-character valid Indian GSTIN'));
+    }
+
+    const maskedGSTIN = maskGSTIN(cleanedGstin);
+    logger.info('🔄 Verifying GSTIN', { userId, maskedGSTIN });
+
+    // Check if GSTIN is already verified for this user
+    const existingVerification = await Verification.findOne({
+      userId,
+      type: 'gstin',
+      status: 'verified'
+    });
+
+    if (existingVerification && existingVerification.maskedGSTIN === maskedGSTIN) {
+      logger.info('✅ GSTIN already verified for user', { userId, verificationId: existingVerification._id });
+      return res.json(successResponse({
+        verificationId: existingVerification._id,
+        maskedGSTIN: existingVerification.maskedGSTIN,
+        verifiedData: {
+          legalName: existingVerification.verifiedData?.legalName,
+          tradeName: existingVerification.verifiedData?.tradeName,
+          status: existingVerification.verifiedData?.gstinStatus || 'Active',
+          taxpayerType: existingVerification.verifiedData?.taxpayerType,
+          registrationDate: existingVerification.verifiedData?.registrationDate,
+          stateCode: existingVerification.verifiedData?.stateCode
+        },
+        status: 'verified',
+        alreadyVerified: true
+      }, 'GSTIN is already verified'));
+    }
+
+    // Get verification provider
+    const provider = getVerificationProvider(process.env);
+    
+    if (!provider || typeof provider.verifyGSTIN !== 'function') {
+      logger.error('❌ Provider does not support GSTIN verification', {
+        provider: provider?.constructor?.name || 'unknown',
+        hasVerifyGSTIN: typeof provider?.verifyGSTIN === 'function'
+      });
+      return res.status(503).json(errorResponse(
+        'GSTIN verification not supported by current provider',
+        'GSTIN verification is not available with the current verification provider. Please contact support.',
+        'PROVIDER_NOT_SUPPORTED'
+      ));
+    }
+
+    logger.info('🔄 Calling provider.verifyGSTIN', {
+      provider: provider.constructor?.name || 'unknown',
+      maskedGSTIN
+    });
+
+    let result;
+    try {
+      result = await provider.verifyGSTIN(cleanedGstin, businessName);
+      logger.info('✅ Provider returned result', {
+        success: result?.success,
+        hasData: !!result?.data
+      });
+    } catch (providerError) {
+      logger.error('❌ Provider.verifyGSTIN threw error', {
+        error: providerError.message,
+        status: providerError.statusCode ?? providerError.response?.status,
+        response: providerError.response?.data
+      });
+      const status = providerError.statusCode ?? providerError.response?.status ?? 500;
+      const message = providerError.response?.data?.message ?? providerError.message ?? 'GSTIN verification failed';
+      return res.status(status).json(errorResponse(message, message));
+    }
+
+    const now = new Date();
+    let verification = await Verification.findOne({
+      userId,
+      type: 'gstin'
+    });
+
+    const cashfreeReferenceId = result.data?.referenceId ?? result.data?.reference_id;
+
+    if (verification) {
+      verification.status = result.success ? 'verified' : 'failed';
+      verification.maskedGSTIN = result.data?.maskedGSTIN || maskedGSTIN;
+      verification.verifiedData = {
+        legalName: result.data?.legalName,
+        tradeName: result.data?.tradeName,
+        gstin: result.data?.gstin || cleanedGstin,
+        gstinStatus: result.data?.status || (result.success ? 'Active' : 'Invalid'),
+        taxpayerType: result.data?.taxpayerType,
+        registrationDate: result.data?.registrationDate,
+        stateCode: result.data?.stateCode
+      };
+      if (cashfreeReferenceId != null) verification.refId = String(cashfreeReferenceId);
+      verification.verifiedAt = result.success ? now : null;
+      verification.failedAt = result.success ? null : now;
+      verification.failureReason = result.success ? null : result.message;
+      verification.auditLog.push({
+        action: result.success ? 'reverified' : 'retry_failed',
+        performedBy: userId,
+        performedAt: now,
+        ipAddress: getClientIp(req),
+        metadata: {
+          provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+          environment: process.env.CASHFREE_ENV || 'sandbox',
+          ...(cashfreeReferenceId != null && { referenceId: cashfreeReferenceId })
+        }
+      });
+      await verification.save();
+    } else {
+      verification = await Verification.create({
+        userId,
+        type: 'gstin',
+        status: result.success ? 'verified' : 'failed',
+        provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+        refId: cashfreeReferenceId != null ? String(cashfreeReferenceId) : undefined,
+        maskedGSTIN: result.data?.maskedGSTIN || maskedGSTIN,
+        verifiedData: {
+          legalName: result.data?.legalName,
+          tradeName: result.data?.tradeName,
+          gstin: result.data?.gstin || cleanedGstin,
+          gstinStatus: result.data?.status || (result.success ? 'Active' : 'Invalid'),
+          taxpayerType: result.data?.taxpayerType,
+          registrationDate: result.data?.registrationDate,
+          stateCode: result.data?.stateCode
+        },
+        consent: {
+          given: true,
+          givenAt: now,
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          consentVersion: consent.version || 'v1.0',
+          consentText: consent.text || 'User consented to GSTIN verification'
+        },
+        auditLog: [{
+          action: 'verified',
+          performedBy: userId,
+          performedAt: now,
+          ipAddress: getClientIp(req),
+          metadata: {
+            provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+            environment: process.env.CASHFREE_ENV || 'sandbox',
+            ...(cashfreeReferenceId != null && { referenceId: cashfreeReferenceId })
+          }
+        }],
+        verifiedAt: result.success ? now : null,
+        failedAt: result.success ? null : now,
+        failureReason: result.success ? null : result.message,
+        metadata: {
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          environment: process.env.CASHFREE_ENV || 'sandbox'
+        }
+      });
+    }
+
+    logger.info('✅ GSTIN verification completed', {
+      userId,
+      verificationId: verification._id,
+      status: verification.status
+    });
+
+    res.json(successResponse({
+      verificationId: verification._id,
+      maskedGSTIN: verification.maskedGSTIN,
+      verifiedData: {
+        legalName: verification.verifiedData?.legalName,
+        tradeName: verification.verifiedData?.tradeName,
+        status: verification.verifiedData?.gstinStatus,
+        taxpayerType: verification.verifiedData?.taxpayerType,
+        registrationDate: verification.verifiedData?.registrationDate,
+        stateCode: verification.verifiedData?.stateCode
+      },
+      status: verification.status,
+      ...(verification.refId && { referenceId: verification.refId })
+    }, result.success ? 'GSTIN verified successfully' : 'GSTIN verification failed'));
+
+  } catch (error) {
+    logger.error('❌ GSTIN verification error', {
+      userId: req.headers['x-user-id'],
+      error: error.message,
+      stack: error.stack
+    });
+
+    let errorMessage = error.message || 'Failed to verify GSTIN';
+    let userMessage = 'An error occurred while verifying GSTIN';
+
+    if (error.message?.includes('Invalid GSTIN format')) {
+      userMessage = 'Invalid GSTIN format. Please check and try again.';
+      errorMessage = error.message;
+    } else if (error.response?.data) {
+      errorMessage = error.response.data.message || error.response.data.error || error.message;
+      userMessage = errorMessage;
+    }
+
+    res.status(500).json(errorResponse(
+      errorMessage,
+      userMessage,
+      error.code || 'GSTIN_VERIFICATION_ERROR'
+    ));
+  }
+});
+
+/**
  * POST /api/v1/verification/bank/verify
  * Verify bank account
  */
@@ -826,48 +1067,145 @@ router.post('/bank/verify', serviceAuthMiddleware, async (req, res) => {
     // Call provider to verify bank account
     const result = await provider.verifyBankAccount(accountNumber, ifsc, accountHolderName);
 
-    // Create verification record
     const now = new Date();
-    const verification = await Verification.create({
-      userId,
-      type: 'bank_account',
-      status: result.success ? 'verified' : 'failed',
-      provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-      maskedBankAccount: result.data?.maskedBankAccount || ('XXXX' + accountNumber.slice(-4)),
-      verifiedData: { 
+    let verification = await Verification.findOne({ userId, type: 'bank_account' });
+
+    if (!result.success) {
+      if (verification) {
+        verification.status = 'failed';
+        verification.provider = process.env.VERIFICATION_PROVIDER || 'cashfree';
+        verification.maskedBankAccount = 'XXXX' + accountNumber.slice(-4);
+        verification.failureReason = result.message || 'Bank account verification failed';
+        verification.failedAt = now;
+        verification.auditLog.push({
+          action: 'retry_failed',
+          performedBy: userId,
+          performedAt: now,
+          ipAddress: getClientIp(req),
+          metadata: {
+            provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+            environment: process.env.CASHFREE_ENV || 'sandbox'
+          }
+        });
+        await verification.save().catch(err => logger.warn('Could not update failed bank verification record', { error: err.message }));
+      } else {
+        await Verification.create({
+          userId,
+          type: 'bank_account',
+          status: 'failed',
+          provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+          maskedBankAccount: 'XXXX' + accountNumber.slice(-4),
+          failureReason: result.message || 'Bank account verification failed',
+          failedAt: now,
+          auditLog: [{
+            action: 'failed',
+            performedBy: userId,
+            performedAt: now,
+            ipAddress: getClientIp(req),
+            metadata: {
+              provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+              environment: process.env.CASHFREE_ENV || 'sandbox'
+            }
+          }]
+        }).catch(err => logger.warn('Could not save failed bank verification record', { error: err.message }));
+      }
+
+      return res.status(400).json(errorResponse(
+        result.message || 'Bank account verification failed',
+        result.message || 'Invalid bank account or IFSC code',
+        'BANK_VERIFICATION_FAILED'
+      ));
+    }
+
+    // Success - Create or update verification record
+    if (verification) {
+      verification.status = 'verified';
+      verification.provider = process.env.VERIFICATION_PROVIDER || 'cashfree';
+      verification.refId = result.data?.referenceId ? String(result.data.referenceId) : undefined;
+      verification.maskedBankAccount = result.data?.maskedBankAccount || ('XXXX' + accountNumber.slice(-4));
+      verification.verifiedData = { 
+        name: result.data?.accountHolderName || accountHolderName,
         accountHolderName: result.data?.accountHolderName || accountHolderName,
-        ifsc: ifsc,
+        ifsc: result.data?.ifsc || ifsc,
         bankName: result.data?.bankName,
         branch: result.data?.branch,
-        status: result.data?.status
-      },
-      consent: {
+        status: result.data?.status || 'VALID',
+        nameMatchScore: result.data?.nameMatchScore,
+        nameMatchResult: result.data?.nameMatchResult,
+      };
+      verification.consent = {
         given: true,
         givenAt: now,
         ipAddress: getClientIp(req),
         userAgent: req.get('user-agent') || 'unknown',
         consentVersion: consent.version || 'v1.0',
         consentText: consent.text || 'User consented to bank account verification'
-      },
-      auditLog: [{
-        action: 'verified',
+      };
+      verification.auditLog.push({
+        action: 'reverified',
         performedBy: userId,
         performedAt: now,
         ipAddress: getClientIp(req),
         metadata: {
           provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
-          environment: process.env.CASHFREE_ENV || 'sandbox'
+          environment: process.env.CASHFREE_ENV || 'sandbox',
+          ...(result.data?.referenceId && { referenceId: result.data.referenceId })
         }
-      }],
-      verifiedAt: result.success ? now : null,
-      failedAt: result.success ? null : now,
-      failureReason: result.success ? null : result.message,
-      metadata: {
+      });
+      verification.verifiedAt = now;
+      verification.failedAt = null;
+      verification.failureReason = null;
+      verification.metadata = {
         ipAddress: getClientIp(req),
         userAgent: req.get('user-agent') || 'unknown',
         environment: process.env.CASHFREE_ENV || 'sandbox'
-      }
-    });
+      };
+      await verification.save();
+    } else {
+      verification = await Verification.create({
+        userId,
+        type: 'bank_account',
+        status: 'verified',
+        provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+        refId: result.data?.referenceId ? String(result.data.referenceId) : undefined,
+        maskedBankAccount: result.data?.maskedBankAccount || ('XXXX' + accountNumber.slice(-4)),
+        verifiedData: { 
+          name: result.data?.accountHolderName || accountHolderName,
+          accountHolderName: result.data?.accountHolderName || accountHolderName,
+          ifsc: result.data?.ifsc || ifsc,
+          bankName: result.data?.bankName,
+          branch: result.data?.branch,
+          status: result.data?.status || 'VALID',
+          nameMatchScore: result.data?.nameMatchScore,
+          nameMatchResult: result.data?.nameMatchResult,
+        },
+        consent: {
+          given: true,
+          givenAt: now,
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          consentVersion: consent.version || 'v1.0',
+          consentText: consent.text || 'User consented to bank account verification'
+        },
+        auditLog: [{
+          action: 'verified',
+          performedBy: userId,
+          performedAt: now,
+          ipAddress: getClientIp(req),
+          metadata: {
+            provider: process.env.VERIFICATION_PROVIDER || 'cashfree',
+            environment: process.env.CASHFREE_ENV || 'sandbox',
+            ...(result.data?.referenceId && { referenceId: result.data.referenceId })
+          }
+        }],
+        verifiedAt: now,
+        metadata: {
+          ipAddress: getClientIp(req),
+          userAgent: req.get('user-agent') || 'unknown',
+          environment: process.env.CASHFREE_ENV || 'sandbox'
+        }
+      });
+    }
 
     logger.info('✅ Bank account verification completed', { 
       userId, 
@@ -876,67 +1214,19 @@ router.post('/bank/verify', serviceAuthMiddleware, async (req, res) => {
     });
 
     // ✨ Update User Service with bank verification status
-    logger.info('📞 [VERIFICATION → USER SERVICE] Calling User Service to update bank verification status', {
-      userId,
-      maskedBankAccount: verification.maskedBankAccount,
-      verifiedData: verification.verifiedData
-    });
-    
-    console.log('🔍 [DEBUG] Verification data before user-service call:', {
-      'verification.verifiedData': verification.verifiedData,
-      'verification.verifiedData.accountHolderName': verification.verifiedData?.accountHolderName,
-      'verification.verifiedData.bankName': verification.verifiedData?.bankName,
-      'verification.verifiedData.ifsc': verification.verifiedData?.ifsc
-    });
-    
     try {
-      console.log('🔍 [DEBUG] About to call userService.updateBankVerificationStatus', {
-        userId,
-        USER_SERVICE_URL: process.env.USER_SERVICE_URL,
-        SERVICE_AUTH_TOKEN_PRESENT: !!process.env.SERVICE_AUTH_TOKEN,
-        verificationData: {
-          isBankVerified: true,
-          bankVerifiedAt: new Date().toISOString(),
-          maskedBankAccount: verification.maskedBankAccount,
-          bankAccount: {
-            accountHolderName: verification.verifiedData?.accountHolderName,
-            bankName: verification.verifiedData?.bankName,
-            ifsc: verification.verifiedData?.ifsc
-          }
-        }
-      });
-      
-      const userServiceUpdate = await userService.updateBankVerificationStatus(userId, {
+      await userService.updateBankVerificationStatus(userId, {
         isBankVerified: true,
-        bankVerifiedAt: new Date().toISOString(),
+        bankVerifiedAt: now.toISOString(),
         maskedBankAccount: verification.maskedBankAccount,
         bankAccount: {
           accountHolderName: verification.verifiedData?.accountHolderName,
           bankName: verification.verifiedData?.bankName,
           ifsc: verification.verifiedData?.ifsc
         }
-      });
-
-      if (userServiceUpdate.success) {
-        logger.info('✅ [VERIFICATION → USER SERVICE] User Service updated with bank verification', { 
-          userId,
-          responseData: userServiceUpdate.data
-        });
-      } else {
-        logger.warn('⚠️ [VERIFICATION → USER SERVICE] Failed to update User Service, but verification succeeded', {
-          userId,
-          error: userServiceUpdate.error,
-          status: userServiceUpdate.status
-        });
-      }
-    } catch (updateError) {
-      // Log but don't fail the verification response
-      logger.error('❌ [VERIFICATION → USER SERVICE] Error updating User Service (non-blocking)', {
-        userId,
-        error: updateError.message,
-        stack: updateError.stack,
-        note: 'Bank verification succeeded but profile update failed'
-      });
+      }).catch(err => logger.warn('User Service bank sync non-blocking error', { error: err.message }));
+    } catch (e) {
+      // Non-blocking
     }
 
     res.json(successResponse({
@@ -947,6 +1237,7 @@ router.post('/bank/verify', serviceAuthMiddleware, async (req, res) => {
         bankName: verification.verifiedData?.bankName,
         ifsc: verification.verifiedData?.ifsc
       },
+      referenceId: result.data?.referenceId,
       status: verification.status
     }, 'Bank account verified successfully'));
 

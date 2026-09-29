@@ -67,6 +67,7 @@ class CashfreeProvider extends BaseVerificationProvider {
 
   hasAadhaarSupport() { return true; }
   hasPANSupport() { return true; }
+  hasGSTINSupport() { return true; }
   hasBankSupport() { return true; }
   hasFaceSupport() { return false; } // Cashfree doesn't support face verification
 
@@ -473,14 +474,23 @@ class CashfreeProvider extends BaseVerificationProvider {
 
     // In sandbox mode, use test data
     if (this.isSandbox()) {
-      const validPANs = ['ABCPV1234D', 'XYZP4321W', 'AZJPG7110R', 'ABCCD8000T', 'XYZH2000L', 'AAAHU4383C', 'AMJCL2021N'];
-      const isValid = validPANs.includes(panNumber);
+      const validPANs = ['ABCPV1234D', 'XYZP4321W', 'AZJPG7110R', 'ABCCD8000T', 'XYZH2000L', 'AAAHU4383C', 'AMJCL2021N', 'NVRPK6324Q'];
+      const isValid = validPANs.includes(panNumber) || /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(panNumber);
 
       if (isValid) {
+        const panNameMap = {
+          'NVRPK6324Q': 'PAVAN KUMAR',
+          'ABCPV1234D': 'VIKRAM SHARMA',
+          'XYZP4321W': 'ANITA SINGH',
+          'AZJPG7110R': 'RAJESH VERMA',
+          'ABCCD8000T': 'SURESH PATEL',
+        };
+        const verifiedName = panNameMap[panNumber] || (name && !name.toLowerCase().includes('draft') && !name.toLowerCase().includes('seller') ? name : 'PAN CARD HOLDER');
+
         return {
           success: true,
           data: {
-            name: 'JOHN DOE',
+            name: verifiedName,
             panNumber: panNumber,
             maskedPAN: this.maskPAN(panNumber),
             status: 'VALID',
@@ -604,6 +614,114 @@ class CashfreeProvider extends BaseVerificationProvider {
   }
 
   // =====================================================
+  // GSTIN VERIFICATION (PRODUCTION - CASHFREE /gstin)
+  // =====================================================
+
+  /**
+   * Verify GSTIN (Cashfree Verification Suite - live/sandbox)
+   * @param {string} gstin - 15-character GSTIN (e.g., 29AAICP2912R1ZR)
+   * @param {string} [businessName] - Optional business/trade name for matching
+   * @returns {Promise<{success: boolean, data?: object, message?: string}>}
+   */
+  async verifyGSTIN(gstin, businessName) {
+    const cleanedGstin = String(gstin || '').replace(/[\s-]/g, '').trim().toUpperCase();
+    if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(cleanedGstin)) {
+      throw new Error('Invalid GSTIN format');
+    }
+
+    logger.info('🔄 [Cashfree] Verifying GSTIN', {
+      gstin: this.maskGSTIN(cleanedGstin),
+      environment: this.environment
+    });
+
+    // In sandbox mode, use test data
+    if (this.isSandbox()) {
+      const validGSTINs = ['29AAICP2912R1ZR', '27AABCU9603R1ZN', '36AAACB8506M1ZP', '07AAAAA0000A1Z5'];
+      const isValid = validGSTINs.includes(cleanedGstin);
+
+      if (isValid) {
+        return {
+          success: true,
+          data: {
+            gstin: cleanedGstin,
+            legalName: businessName || 'EXTRAHAND ENTERPRISES PRIVATE LIMITED',
+            tradeName: businessName || 'EXTRAHAND STORE',
+            status: 'Active',
+            taxpayerType: 'Regular',
+            registrationDate: '01/07/2017',
+            stateCode: cleanedGstin.substring(0, 2),
+            maskedGSTIN: this.maskGSTIN(cleanedGstin),
+            referenceId: 162
+          }
+        };
+      }
+      return {
+        success: false,
+        message: 'Invalid GSTIN number',
+        data: null
+      };
+    }
+
+    // Production: Call Cashfree Verify GSTIN API (POST /gstin) with retry for 429/5xx
+    const body = {
+      GSTIN: cleanedGstin
+    };
+    if (businessName && String(businessName).trim()) {
+      body.business_name = String(businessName).trim();
+    }
+
+    try {
+      return await retryWithBackoff(
+        async () => {
+          const response = await axios.post(
+            `${this.baseUrl}/gstin`,
+            body,
+            { headers: this.getPanHeaders(), timeout: 30000 }
+          );
+
+          const data = response.data;
+          const valid = data.valid === true || data.status === 'VALID' || (data.gstin_status && data.gstin_status.toLowerCase() === 'active');
+
+          if (!valid) {
+            return {
+              success: false,
+              message: data.message || 'Invalid GSTIN',
+              data: null
+            };
+          }
+
+          const legalName = data.legal_name || data.registered_name || data.business_name || data.trade_name;
+          const tradeName = data.trade_name || data.business_name || legalName;
+
+          return {
+            success: true,
+            data: {
+              gstin: data.gstin || data.GSTIN || cleanedGstin,
+              legalName: legalName || '—',
+              tradeName: tradeName || '—',
+              status: data.gstin_status || data.status || 'Active',
+              taxpayerType: data.taxpayer_type,
+              registrationDate: data.registration_date,
+              stateCode: data.state_code || cleanedGstin.substring(0, 2),
+              address: data.principal_place_address || data.address,
+              maskedGSTIN: this.maskGSTIN(data.gstin || cleanedGstin),
+              referenceId: data.reference_id || data.verification_id
+            }
+          };
+        },
+        { maxRetries: 3, initialDelay: 1000, backoffMultiplier: 2 }
+      );
+    } catch (error) {
+      logger.error('❌ [Cashfree] GSTIN verification error', {
+        error: error.message,
+        status: error.statusCode || error.response?.status,
+        response: error.response?.data
+      });
+      throw error;
+    }
+  }
+
+  // =====================================================
   // BANK VERIFICATION (READY - FEATURE FLAG REQUIRED)
   // =====================================================
 
@@ -612,7 +730,7 @@ class CashfreeProvider extends BaseVerificationProvider {
    * @param {string} accountNumber - Bank account number
    * @param {string} ifsc - IFSC code
    * @param {string} accountHolderName - Account holder name (optional, for name matching)
-   * @returns {Promise<{success: boolean, data?: object}>}
+   * @returns {Promise<{success: boolean, data?: object, message?: string}>}
    */
   async verifyBankAccount(accountNumber, ifsc, accountHolderName) {
     logger.info('🔄 [Cashfree] Verifying Bank Account', {
@@ -641,13 +759,14 @@ class CashfreeProvider extends BaseVerificationProvider {
         return {
           success: true,
           data: {
-            accountHolderName: accountInfo.name,
+            accountHolderName: accountHolderName || accountInfo.name,
             accountNumber: accountNumber,
             maskedBankAccount: this.maskBankAccount(accountNumber),
             ifsc: ifsc,
             bankName: accountInfo.bank,
             branch: accountInfo.branch,
             status: 'VALID',
+            referenceId: 'sandbox_' + Date.now(),
           }
         };
       } else {
@@ -659,34 +778,115 @@ class CashfreeProvider extends BaseVerificationProvider {
       }
     }
 
-    // Production: Call actual Cashfree API
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}/bank-account/verify`,
-        {
-          account_number: accountNumber,
-          ifsc_code: ifsc
-        },
-        { headers: this.getHeaders(), timeout: 30000 }
-      );
+    // Production: Call actual Cashfree API with retry logic
+    const body = {
+      bank_account: accountNumber,
+      account_number: accountNumber,
+      ifsc: ifsc,
+      ifsc_code: ifsc,
+    };
+    if (accountHolderName && String(accountHolderName).trim()) {
+      body.name = String(accountHolderName).trim();
+    }
 
-      return {
-        success: true,
-        data: {
-          accountNumber: response.data.account_number,
-          maskedBankAccount: this.maskBankAccount(accountNumber),
-          accountHolderName: response.data.account_holder_name,
-          ifsc: response.data.ifsc,
-          bankName: response.data.bank_name,
-          status: response.data.status,
-        }
-      };
+    try {
+      return await retryWithBackoff(
+        async () => {
+          let response;
+          try {
+            // Attempt V2 endpoint first: /bank-account/sync
+            response = await axios.post(
+              `${this.baseUrl}/bank-account/sync`,
+              body,
+              { headers: this.getHeaders(), timeout: 30000 }
+            );
+          } catch (v2Error) {
+            // Fallback to /bank-account/verify if /bank-account/sync returns 404
+            if (v2Error.response?.status === 404) {
+              logger.warn('🔄 [Cashfree] /bank-account/sync 404, falling back to /bank-account/verify');
+              response = await axios.post(
+                `${this.baseUrl}/bank-account/verify`,
+                body,
+                { headers: this.getHeaders(), timeout: 30000 }
+              );
+            } else {
+              throw v2Error;
+            }
+          }
+
+          const resData = response.data?.data || response.data || {};
+          const statusValue = (
+            resData.account_status ||
+            resData.accountStatus ||
+            resData.account_status_code ||
+            resData.accountStatusCode ||
+            resData.status ||
+            response.data?.status ||
+            ''
+          ).toUpperCase();
+          const isValid =
+            statusValue === 'VALID' ||
+            statusValue === 'ACCOUNT_IS_VALID' ||
+            statusValue === 'SUCCESS' ||
+            resData.accountExists === 'YES' ||
+            resData.account_exists === 'YES';
+
+          if (!isValid) {
+            return {
+              success: false,
+              message: response.data?.message || resData.message || 'Bank account is invalid or does not exist',
+              data: null
+            };
+          }
+
+          const verifiedName =
+            resData.name_at_bank ||
+            resData.nameAtBank ||
+            resData.account_holder_name ||
+            resData.accountHolderName ||
+            accountHolderName;
+          const verifiedBankName =
+            resData.bank_name ||
+            resData.bankName ||
+            resData.ifsc_details?.bank;
+          const refId =
+            resData.reference_id ||
+            resData.bvRefId ||
+            resData.refId ||
+            response.data?.reference_id ||
+            response.data?.subCode;
+
+          return {
+            success: true,
+            data: {
+              accountNumber: resData.bank_account || resData.bankAccount || resData.account_number || accountNumber,
+              maskedBankAccount: this.maskBankAccount(accountNumber),
+              accountHolderName: verifiedName,
+              ifsc: resData.ifsc || resData.ifsc_code || resData.ifsc_details?.ifsc || ifsc,
+              bankName: verifiedBankName,
+              branch: resData.branch || resData.ifsc_details?.branch,
+              city: resData.city || resData.ifsc_details?.city,
+              status: 'VALID',
+              nameMatchScore: resData.name_match_score || resData.nameMatchScore,
+              nameMatchResult: resData.name_match_result || resData.nameMatchResult,
+              referenceId: refId
+            }
+          };
+        },
+        { maxRetries: 3, initialDelay: 1000, backoffMultiplier: 2 }
+      );
     } catch (error) {
       logger.error('❌ [Cashfree] Bank verification error', {
         error: error.message,
+        status: error.response?.status,
         response: error.response?.data
       });
-      throw error;
+      const errorMsg = error.response?.data?.message || error.response?.data?.error || error.message || 'Bank account verification failed';
+      return {
+        success: false,
+        message: errorMsg,
+        data: null
+      };
     }
   }
 }
