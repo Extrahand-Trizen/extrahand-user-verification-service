@@ -22,6 +22,7 @@ const FEATURES = {
   AADHAAR_OCR: process.env.FEATURE_AADHAAR_OCR === 'true',
   PAN: process.env.FEATURE_PAN === 'true',          // 🔒 DISABLED (ready to enable)
   BANK: process.env.FEATURE_BANK === 'true',        // 🔒 DISABLED (ready to enable)
+  DRIVING_LICENSE: process.env.FEATURE_DRIVING_LICENSE !== 'false',
   FACE: process.env.FEATURE_FACE === 'true',        // 🔒 DISABLED (ready to enable)
   LIVENESS: process.env.FEATURE_LIVENESS === 'true', // 🔒 DISABLED (ready to enable)
 };
@@ -1181,6 +1182,188 @@ router.post('/face/liveness', serviceAuthMiddleware, async (req, res) => {
     ));
   }
 });
+
+router.post('/driving-license/verify', serviceAuthMiddleware, async (req, res) => {
+  if (!FEATURES.DRIVING_LICENSE) {
+    return res.status(503).json(errorResponse(
+      'Driving license verification is temporarily disabled',
+      'This feature is currently unavailable',
+      'FEATURE_DISABLED'
+    ));
+  }
+
+  try {
+    const userId = req.headers['x-user-id'] || req.body.userId;
+    const { drivingLicenseNumber, dateOfBirth } = req.body;
+    const licenseNumber = typeof drivingLicenseNumber === 'string'
+      ? drivingLicenseNumber.toUpperCase().replace(/[\s-]/g, '')
+      : '';
+
+    if (!userId) {
+      return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
+    }
+    if (!licenseNumber || !dateOfBirth) {
+      return res.status(400).json(errorResponse(
+        'Missing required fields: drivingLicenseNumber and dateOfBirth',
+        'Driving license number and date of birth are required'
+      ));
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth) || Number.isNaN(Date.parse(dateOfBirth))) {
+      return res.status(400).json(errorResponse('Invalid dateOfBirth', 'Date of birth must use YYYY-MM-DD format'));
+    }
+
+    const provider = getVerificationProvider(process.env);
+    if (typeof provider.verifyDrivingLicense !== 'function') {
+      return res.status(503).json(errorResponse(
+        'Driving license verification is not supported by the configured provider',
+        'Driving license verification is not available'
+      ));
+    }
+
+    let result;
+    try {
+      result = await provider.verifyDrivingLicense(licenseNumber, dateOfBirth);
+    } catch (providerError) {
+      const providerMessage = getDrivingLicenseProviderMessage(providerError);
+      await saveDrivingLicenseVerification({
+        userId,
+        licenseNumber,
+        providerName: provider.providerName,
+        req,
+        success: false,
+        failureReason: redactDrivingLicenseFailureMessage(providerMessage, licenseNumber, dateOfBirth),
+      });
+      throw providerError;
+    }
+
+    const failureReason = result.success
+      ? null
+      : redactDrivingLicenseFailureMessage(result.message, licenseNumber, dateOfBirth);
+    if (!result.success) {
+      logger.warn('Driving license verification rejected by provider', {
+        userId,
+        provider: provider.providerName,
+        reason: failureReason,
+        status: result.data?.status,
+        providerCode: result.data?.code,
+      });
+    }
+
+    const verification = await saveDrivingLicenseVerification({
+      userId,
+      licenseNumber,
+      providerName: provider.providerName,
+      req,
+      success: result.success === true,
+      failureReason,
+      referenceId: result.data?.referenceId,
+    });
+
+    if (!result.success) {
+      return res.status(422).json(errorResponse(
+        result.message || 'Driving license verification failed',
+        result.message || 'We could not verify these details. Check the number and date of birth.'
+      ));
+    }
+
+    return res.json(successResponse({
+      verified: true,
+      status: result.data?.status || 'VALID',
+      verificationId: verification._id,
+    }, 'Driving license verified successfully'));
+  } catch (error) {
+    logger.error('Driving license verification failed', {
+      userId: req.headers['x-user-id'] || req.body.userId,
+      error: redactDrivingLicenseFailureMessage(
+        getDrivingLicenseProviderMessage(error),
+        req.body.drivingLicenseNumber,
+        req.body.dateOfBirth,
+      ),
+      providerCode: error.response?.data?.code || error.response?.data?.error_code,
+      status: error.statusCode || error.response?.status,
+    });
+    const status = error.statusCode || error.response?.status || 500;
+    const message = getDrivingLicenseProviderMessage(error);
+    return res.status(status).json(errorResponse(message, message));
+  }
+});
+
+function getDrivingLicenseProviderMessage(error) {
+  const data = error?.response?.data;
+  const candidates = [
+    data?.message,
+    data?.status_message,
+    data?.error_message,
+    data?.error_description,
+    typeof data?.error === 'string' ? data.error : null,
+    data?.error?.message,
+    data?.error?.description,
+    data?.data?.message,
+    error?.message,
+  ];
+  return candidates.find((value) => typeof value === 'string' && value.trim())?.trim() ||
+    'Driving license verification failed';
+}
+
+function redactDrivingLicenseFailureMessage(message, licenseNumber, dateOfBirth) {
+  let redacted = String(message || 'Driving license verification failed');
+  for (const value of [licenseNumber, dateOfBirth]) {
+    if (value) {
+      const escaped = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      redacted = redacted.replace(new RegExp(escaped, 'gi'), '[REDACTED]');
+    }
+  }
+  return redacted.slice(0, 500);
+}
+
+async function saveDrivingLicenseVerification({
+  userId,
+  licenseNumber,
+  providerName,
+  req,
+  success,
+  failureReason,
+  referenceId,
+}) {
+  const now = new Date();
+  const verification = await Verification.findOne({ userId, type: 'driving_license' }) ||
+    new Verification({ userId, type: 'driving_license' });
+  const isNewVerification = verification.isNew;
+  const wasVerified = verification.status === 'verified';
+  const safeProviderName = ['cashfree', 'mock', 'signzy', 'karza'].includes(providerName)
+    ? providerName
+    : 'cashfree';
+
+  verification.status = success ? 'verified' : 'failed';
+  verification.provider = safeProviderName;
+  verification.maskedDrivingLicense = `********${licenseNumber.slice(-4)}`;
+  verification.initiatedAt = verification.initiatedAt || now;
+  verification.verifiedAt = success ? now : null;
+  verification.failedAt = success ? null : now;
+  verification.failureReason = success ? null : failureReason;
+  if (referenceId != null) verification.refId = String(referenceId);
+  verification.metadata = {
+    ipAddress: getClientIp(req),
+    userAgent: req.get('user-agent') || 'unknown',
+    environment: process.env.CASHFREE_ENV || 'sandbox',
+  };
+  verification.auditLog.push({
+    action: success
+      ? (isNewVerification || !wasVerified ? 'verified' : 'reverified')
+      : (isNewVerification ? 'failed' : 'retry_failed'),
+    performedBy: userId,
+    performedAt: now,
+    ipAddress: getClientIp(req),
+    metadata: {
+      provider: safeProviderName,
+      environment: process.env.CASHFREE_ENV || 'sandbox',
+      ...(referenceId != null && { referenceId: String(referenceId) }),
+    },
+  });
+
+  await verification.save();
+  return verification;
+}
 
 // =====================================================
 // BULK STORAGE ENDPOINT (for admin bulk upload)

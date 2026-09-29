@@ -1,8 +1,35 @@
 const BaseVerificationProvider = require('./BaseProvider');
 const axios = require('axios');
+const { randomUUID } = require('node:crypto');
 const logger = require('../../config/logger');
 const { getCashfreeBaseUrl } = require('../../config/env');
 const { retryWithBackoff } = require('../../utils/errorHandler');
+
+function getCashfreeFailureMessage(data) {
+  const candidates = [
+    data?.message,
+    data?.status_message,
+    data?.error_message,
+    data?.error_description,
+    typeof data?.error === 'string' ? data.error : null,
+    data?.error?.message,
+    data?.error?.description,
+    data?.reason,
+    data?.data?.message,
+  ];
+  return candidates.find((value) => typeof value === 'string' && value.trim())?.trim();
+}
+
+function redactDrivingLicenseFailureMessage(message, licenseNumber, dateOfBirth) {
+  let redacted = String(message || 'Driving license verification failed');
+  for (const value of [licenseNumber, dateOfBirth]) {
+    if (value) {
+      const escaped = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      redacted = redacted.replace(new RegExp(escaped, 'gi'), '[REDACTED]');
+    }
+  }
+  return redacted.slice(0, 500);
+}
 
 /**
  * Cashfree Verification Provider
@@ -513,6 +540,64 @@ class CashfreeProvider extends BaseVerificationProvider {
         error: error.message,
         status: error.statusCode || error.response?.status,
         response: error.response?.data
+      });
+      throw error;
+    }
+  }
+
+  async verifyDrivingLicense(licenseNumber, dateOfBirth) {
+    const normalizedNumber = String(licenseNumber || '').toUpperCase().replace(/[\s-]/g, '');
+    if (!normalizedNumber || !dateOfBirth) {
+      throw new Error('Driving license number and date of birth are required');
+    }
+
+    try {
+      const response = await axios.post(
+        `${this.baseUrl}/driving-license`,
+        {
+          verification_id: `dl_${randomUUID()}`,
+          dl_number: normalizedNumber,
+          dob: dateOfBirth,
+        },
+        { headers: this.getPanHeaders(), timeout: 30000 }
+      );
+
+      const data = response.data || {};
+      const status = String(data.license_status || data.status || '').toUpperCase();
+      const isValid =
+        data.valid === true ||
+        String(data.valid).toLowerCase() === 'true' ||
+        status === 'VALID' ||
+        status === 'ACTIVE';
+      const failureMessage = getCashfreeFailureMessage(data);
+      return {
+        success: isValid,
+        message: isValid
+          ? 'Driving license verified successfully'
+          : failureMessage || 'Driving license could not be verified',
+        data: isValid
+          ? {
+              status,
+              name: data.name || data.registered_name,
+              licenseNumber: normalizedNumber,
+              referenceId: data.reference_id || data.verification_id,
+            }
+          : {
+              status,
+              code: data.code || data.error_code,
+            },
+      };
+    } catch (error) {
+      const responseData = error.response?.data;
+      const providerMessage = getCashfreeFailureMessage(responseData);
+      logger.error('❌ [Cashfree] Driving license verification error', {
+        error: redactDrivingLicenseFailureMessage(
+          providerMessage || error.message,
+          normalizedNumber,
+          dateOfBirth,
+        ),
+        providerCode: responseData?.code || responseData?.error_code,
+        status: error.statusCode || error.response?.status,
       });
       throw error;
     }

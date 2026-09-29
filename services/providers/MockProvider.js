@@ -185,6 +185,19 @@ class MockProvider extends BaseVerificationProvider {
     };
   }
 
+  async verifyDrivingLicense(licenseNumber, dateOfBirth) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return {
+      success: true,
+      message: 'Driving license verified successfully (mock)',
+      data: {
+        licenseNumber: String(licenseNumber).toUpperCase(),
+        dob: dateOfBirth,
+        status: 'VALID',
+      },
+    };
+  }
+
   // =====================================================
   // BANK VERIFICATION (MOCK)
   // =====================================================
