@@ -25,8 +25,9 @@ const { isVerificationTestMode } = require('../config/env');
  * @param {object} config - Configuration object with provider settings
  * @returns {BaseVerificationProvider} Verification provider instance
  */
-function getVerificationProvider(config) {
-  let providerName = config.VERIFICATION_PROVIDER || 'cashfree';
+function getVerificationProvider(config = process.env) {
+  const cfg = config || process.env;
+  let providerName = cfg.VERIFICATION_PROVIDER || 'cashfree';
   if (isVerificationTestMode(config) && providerName === 'cashfree') {
     providerName = 'mock';
     logger.info('🧪 VERIFICATION_TEST_MODE — using mock provider for OTP/PAN/bank flows');

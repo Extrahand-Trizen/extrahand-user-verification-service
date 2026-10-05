@@ -5,6 +5,7 @@ const Verification = require('../models/Verification');
 const KycSession = require('../models/KycSession');
 const { getVerificationProvider } = require('../services/providerFactory');
 const digilockerService = require('../services/digilockerService');
+const smartOcrService = require('../services/smartOcrService');
 const { finalizeDigilockerSession } = require('../services/digilockerCompletionService');
 const { assertNoActiveOcrSession } = require('../services/sessionExclusionService');
 const { serviceAuthMiddleware } = require('../middleware/auth');
@@ -17,6 +18,23 @@ const axios = require('axios');
 // =====================================================
 // FEATURE FLAGS
 // =====================================================
+function formatAddressObject(addr) {
+  if (!addr) return undefined;
+  if (typeof addr === 'string') {
+    return { line1: addr };
+  }
+  if (typeof addr === 'object') {
+    return {
+      line1: addr.line1 || addr.house || addr.street || addr.address || (typeof addr === 'string' ? addr : ''),
+      line2: addr.line2 || addr.locality || addr.district || '',
+      city: addr.city || addr.district || '',
+      state: addr.state || '',
+      pincode: addr.pincode || addr.pinCode || addr.pin || '',
+    };
+  }
+  return undefined;
+}
+
 const FEATURES = {
   AADHAAR: process.env.FEATURE_AADHAAR !== 'false', // ✅ ENABLED by default
   AADHAAR_OCR: process.env.FEATURE_AADHAAR_OCR === 'true',
@@ -211,6 +229,400 @@ router.post('/aadhaar/digilocker/initiate', serviceAuthMiddleware, async (req, r
     ));
   }
 });
+
+/**
+ * POST /api/v1/verification/aadhaar/verify
+ * Direct Aadhaar document verification with Cashfree (Front & Back images + Aadhaar number)
+ */
+router.post('/aadhaar/verify', serviceAuthMiddleware, async (req, res) => {
+  try {
+    if (!FEATURES.AADHAAR) {
+      return res.status(503).json(errorResponse(
+        'Aadhaar verification is temporarily disabled',
+        'This feature is currently unavailable',
+        'FEATURE_DISABLED'
+      ));
+    }
+
+    const userId = req.headers['x-user-id'] || req.body.userId;
+    const {
+      aadhaarNumber,
+      aadhaarFrontImage,
+      aadhaarBackImage,
+      frontImage,
+      backImage,
+      aadhaarFrontCrop,
+      aadhaarBackCrop,
+      frontCrop,
+      backCrop,
+    } = req.body;
+    const targetFront = (aadhaarFrontImage || frontImage || '').trim();
+    const targetBack = (aadhaarBackImage || backImage || '').trim();
+    const targetFrontCrop = aadhaarFrontCrop || frontCrop;
+    const targetBackCrop = aadhaarBackCrop || backCrop;
+
+    if (!userId) {
+      return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
+    }
+
+    if (!aadhaarNumber) {
+      return res.status(400).json(errorResponse('Missing required field: aadhaarNumber', 'Aadhaar number is required'));
+    }
+
+    const cleanNum = cleanAadhaarNumber(aadhaarNumber);
+    if (!isValidAadhaarFormat(cleanNum)) {
+      return res.status(400).json(errorResponse('Invalid Aadhaar format', 'Aadhaar number must be 12 digits starting with 2-9'));
+    }
+
+    if (!targetFront || !targetBack) {
+      return res.status(400).json(errorResponse('Missing required image files', 'Both front and back Aadhaar card images are required'));
+    }
+
+    const maskedAadhaar = maskAadhaar(cleanNum);
+
+    logger.info('🔀 [VERIFICATION SERVICE] Direct Aadhaar document verification initiated', {
+      userId,
+      maskedAadhaar,
+      hasFront: !!targetFront,
+      hasBack: !!targetBack,
+      hasFrontCrop: !!targetFrontCrop,
+      hasBackCrop: !!targetBackCrop,
+    });
+
+    let result;
+    try {
+      const provider = getVerificationProvider(process.env);
+      if (provider && typeof provider.verifyAadhaarDocument === 'function') {
+        result = await provider.verifyAadhaarDocument({
+          userId,
+          aadhaarNumber: cleanNum,
+          frontImage: targetFront,
+          backImage: targetBack,
+        });
+      } else if (smartOcrService && typeof smartOcrService.submitAadhaarOcr === 'function') {
+        const parseImageBuffer = (imgStr) => {
+          if (Buffer.isBuffer(imgStr)) return imgStr;
+          if (typeof imgStr === 'string' && imgStr.startsWith('data:image/')) {
+            const base64Data = imgStr.split(',')[1];
+            return Buffer.from(base64Data, 'base64');
+          }
+          if (typeof imgStr === 'string') {
+            return Buffer.from(imgStr, 'base64');
+          }
+          return Buffer.from(imgStr);
+        };
+
+        const cropImageWithJimp = async (imgBuf, cropBox) => {
+          if (!cropBox || typeof cropBox !== 'object') {
+            return imgBuf;
+          }
+          const xNorm = cropBox.xNorm ?? cropBox.x ?? 0;
+          const yNorm = cropBox.yNorm ?? cropBox.y ?? 0;
+          const widthNorm = cropBox.widthNorm ?? cropBox.width ?? 1;
+          const heightNorm = cropBox.heightNorm ?? cropBox.height ?? 1;
+
+          if (widthNorm >= 0.99 && heightNorm >= 0.99 && xNorm <= 0.01 && yNorm <= 0.01) {
+            return imgBuf;
+          }
+
+          try {
+            const { Jimp } = require('jimp');
+            const image = await Jimp.read(imgBuf);
+            const origW = image.bitmap.width;
+            const origH = image.bitmap.height;
+
+            const cropX = Math.max(0, Math.floor(xNorm * origW));
+            const cropY = Math.max(0, Math.floor(yNorm * origH));
+            const cropW = Math.min(origW - cropX, Math.ceil(widthNorm * origW));
+            const cropH = Math.min(origH - cropY, Math.ceil(heightNorm * origH));
+
+            if (cropW > 10 && cropH > 10 && (cropW < origW || cropH < origH || cropX > 0 || cropY > 0)) {
+              image.crop({ x: cropX, y: cropY, w: cropW, h: cropH });
+              const croppedBuffer = await image.getBuffer('image/jpeg');
+              logger.info('✂️ [VERIFICATION SERVICE] Image successfully cropped server-side', {
+                original: `${origW}x${origH}`,
+                cropped: `${cropW}x${cropH}`,
+                cropBox: { xNorm, yNorm, widthNorm, heightNorm },
+              });
+              return croppedBuffer;
+            }
+          } catch (err) {
+            logger.warn('⚠️ Server-side image crop warning (using raw buffer fallback)', { error: err.message });
+          }
+          return imgBuf;
+        };
+
+        const rawFrontBuf = parseImageBuffer(targetFront);
+        const rawBackBuf = parseImageBuffer(targetBack);
+        const frontBuf = await cropImageWithJimp(rawFrontBuf, targetFrontCrop);
+        const backBuf = await cropImageWithJimp(rawBackBuf, targetBackCrop);
+
+        const cfVerificationId = `eh_aadhaar_${crypto.randomUUID().replace(/-/g, '')}`;
+
+        const frontOcr = await smartOcrService.submitAadhaarOcr({
+          verificationId: `${cfVerificationId}_f`,
+          fileBuffer: frontBuf,
+          mimeType: 'image/jpeg',
+          side: 'front',
+        });
+
+        const backOcr = await smartOcrService.submitAadhaarOcr({
+          verificationId: `${cfVerificationId}_b`,
+          fileBuffer: backBuf,
+          mimeType: 'image/jpeg',
+          side: 'back',
+        });
+
+        result = {
+          success: true,
+          status: 'verified',
+          maskedAadhaar,
+          frontData: frontOcr.mapped,
+          backData: backOcr.mapped,
+        };
+      }
+    } catch (cfErr) {
+      logger.warn('⚠️ Cashfree Aadhaar verification error', {
+        userId,
+        error: cfErr.message,
+      });
+      return res.status(400).json(errorResponse(
+        cfErr.message || 'Aadhaar verification failed with Cashfree provider',
+        'Invalid Aadhaar card or document could not be verified by Cashfree',
+        'CASHFREE_VERIFICATION_FAILED'
+      ));
+    }
+
+    const now = new Date();
+    let verification = await Verification.findByUserIdAndType(userId, 'aadhaar');
+    if (!verification) {
+      verification = new Verification({
+        userId,
+        type: 'aadhaar',
+        provider: 'cashfree',
+        verificationMethod: 'aadhaar_ocr',
+        verificationSource: 'self_service_api',
+        consent: {
+          given: true,
+          givenAt: now,
+          consentVersion: 'v1.0',
+          consentText: 'User consented to Aadhaar verification via OCR & OTP',
+        },
+        initiatedAt: now,
+      });
+    }
+
+    verification.maskedAadhaar = maskedAadhaar;
+    verification.ocrMetadata = {
+      ...verification.ocrMetadata,
+      ocrStatus: 'VERIFIED',
+      frontData: result.frontData,
+      backData: result.backData,
+      internalCompletedAt: now,
+    };
+    const targetAddr = result.backData?.address || result.frontData?.address || verification.verifiedData?.address;
+    verification.verifiedData = {
+      ...verification.verifiedData,
+      name: result.frontData?.name || verification.verifiedData?.name,
+      dob: result.frontData?.dob || result.backData?.dob || verification.verifiedData?.dob,
+      address: formatAddressObject(targetAddr),
+    };
+
+    // If OTP was already verified, set full status to verified, otherwise mark ocr_verified
+    if (verification.otpVerified) {
+      verification.status = 'verified';
+      verification.verifiedAt = now;
+    } else {
+      verification.status = 'under_review'; // OCR verified, awaiting OTP
+    }
+    await verification.save();
+
+    return res.json(successResponse({
+      ...result,
+      ocrStatus: 'VERIFIED',
+      otpVerified: !!verification.otpVerified,
+      overallStatus: verification.status,
+    }, 'Aadhaar document Smart OCR verified successfully'));
+  } catch (error) {
+    logger.error('❌ Error in /aadhaar/verify', { error: error.message });
+    return res.status(500).json(errorResponse(error.message, 'Aadhaar verification failed'));
+  }
+});
+
+/**
+ * POST /api/v1/verification/aadhaar/otp/generate
+ * Initiate Cashfree Aadhaar OTP generation
+ */
+router.post('/aadhaar/otp/generate', serviceAuthMiddleware, async (req, res) => {
+  try {
+    if (!FEATURES.AADHAAR) {
+      return res.status(503).json(errorResponse(
+        'Aadhaar verification is temporarily disabled',
+        'This feature is currently unavailable',
+        'FEATURE_DISABLED'
+      ));
+    }
+
+    const userId = req.headers['x-user-id'] || req.body.userId;
+    const { aadhaarNumber } = req.body;
+
+    if (!userId) {
+      return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
+    }
+    if (!aadhaarNumber) {
+      return res.status(400).json(errorResponse('Missing required field: aadhaarNumber', 'Aadhaar number is required'));
+    }
+
+    const cleanNum = cleanAadhaarNumber(aadhaarNumber);
+    if (!isValidAadhaarFormat(cleanNum)) {
+      return res.status(400).json(errorResponse('Invalid Aadhaar format', 'Aadhaar number must be 12 digits starting with 2-9'));
+    }
+
+    const provider = getVerificationProvider(process.env);
+    if (!provider || typeof provider.generateAadhaarOTP !== 'function') {
+      return res.status(500).json(errorResponse('Aadhaar OTP provider not configured', 'OTP service unavailable'));
+    }
+
+    logger.info('🔄 Generating Aadhaar OTP via Cashfree', { userId, maskedAadhaar: maskAadhaar(cleanNum) });
+    const otpResult = await provider.generateAadhaarOTP(cleanNum);
+
+    if (!otpResult.success || !otpResult.refId) {
+      return res.status(400).json(errorResponse(otpResult.message || 'Failed to generate Aadhaar OTP', 'OTP generation failed'));
+    }
+
+    const now = new Date();
+    let verification = await Verification.findByUserIdAndType(userId, 'aadhaar');
+    if (!verification) {
+      verification = new Verification({
+        userId,
+        type: 'aadhaar',
+        provider: 'cashfree',
+        verificationMethod: 'aadhaar_otp',
+        verificationSource: 'self_service_api',
+        consent: {
+          given: true,
+          givenAt: now,
+          consentVersion: 'v1.0',
+          consentText: 'User consented to Aadhaar OTP verification',
+        },
+        initiatedAt: now,
+      });
+    }
+
+    verification.refId = String(otpResult.refId);
+    verification.maskedAadhaar = maskAadhaar(cleanNum);
+    verification.otpSent = true;
+    verification.otpSentAt = now;
+    verification.otpExpiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+    verification.status = 'otp_sent';
+    await verification.save();
+
+    return res.json(successResponse({
+      refId: String(otpResult.refId),
+      maskedAadhaar: maskAadhaar(cleanNum),
+      message: otpResult.message || 'OTP sent successfully to registered mobile',
+    }, 'Aadhaar OTP generated successfully'));
+  } catch (error) {
+    logger.error('❌ Error in /aadhaar/otp/generate', { error: error.message });
+    return res.status(error.statusCode || 500).json(errorResponse(error.message, 'Failed to generate Aadhaar OTP'));
+  }
+});
+
+/**
+ * POST /api/v1/verification/aadhaar/otp/verify
+ * Verify Cashfree Aadhaar OTP
+ */
+router.post('/aadhaar/otp/verify', serviceAuthMiddleware, async (req, res) => {
+  try {
+    if (!FEATURES.AADHAAR) {
+      return res.status(503).json(errorResponse(
+        'Aadhaar verification is temporarily disabled',
+        'This feature is currently unavailable',
+        'FEATURE_DISABLED'
+      ));
+    }
+
+    const userId = req.headers['x-user-id'] || req.body.userId;
+    const { refId, otp, aadhaarNumber } = req.body;
+
+    if (!userId || !refId || !otp) {
+      return res.status(400).json(errorResponse('Missing required fields', 'userId, refId, and otp are required'));
+    }
+
+    const provider = getVerificationProvider(process.env);
+    if (!provider || typeof provider.verifyAadhaarOTP !== 'function') {
+      return res.status(500).json(errorResponse('Aadhaar OTP provider not configured', 'OTP service unavailable'));
+    }
+
+    logger.info('🔄 Verifying Aadhaar OTP via Cashfree', { userId, refId, otpLength: otp.length });
+    const verifyResult = await provider.verifyAadhaarOTP(refId, otp);
+
+    if (!verifyResult.success || verifyResult.status !== 'verified') {
+      return res.status(400).json(errorResponse(verifyResult.message || 'Invalid OTP', 'Aadhaar OTP verification failed'));
+    }
+
+    const now = new Date();
+    let verification = await Verification.findByUserIdAndType(userId, 'aadhaar');
+    if (!verification) {
+      verification = new Verification({
+        userId,
+        type: 'aadhaar',
+        provider: 'cashfree',
+        verificationMethod: 'aadhaar_otp',
+        verificationSource: 'self_service_api',
+        consent: {
+          given: true,
+          givenAt: now,
+          consentVersion: 'v1.0',
+          consentText: 'User consented to Aadhaar verification',
+        },
+        initiatedAt: now,
+      });
+    }
+
+    verification.otpVerified = true;
+    verification.otpVerifiedAt = now;
+    if (verifyResult.maskedAadhaar) {
+      verification.maskedAadhaar = verifyResult.maskedAadhaar;
+    } else if (aadhaarNumber) {
+      verification.maskedAadhaar = maskAadhaar(cleanAadhaarNumber(aadhaarNumber));
+    }
+
+    const vData = verifyResult.verifiedData || {};
+    const rawAddr = vData.address || verification.verifiedData?.address;
+    verification.verifiedData = {
+      ...verification.verifiedData,
+      name: vData.name || verification.verifiedData?.name,
+      dob: vData.yearOfBirth ? String(vData.yearOfBirth) : (vData.dob || verification.verifiedData?.dob),
+      gender: vData.gender || verification.verifiedData?.gender,
+      address: formatAddressObject(rawAddr),
+    };
+
+    const isOcrVerified = verification.ocrMetadata?.ocrStatus === 'VERIFIED';
+    if (isOcrVerified) {
+      verification.status = 'verified';
+      verification.verifiedAt = now;
+    } else {
+      verification.status = 'otp_verified'; // OTP verified, waiting for OCR
+    }
+    await verification.save();
+
+    return res.json(successResponse({
+      success: true,
+      refId,
+      otpVerified: true,
+      ocrVerified: isOcrVerified,
+      overallStatus: verification.status,
+      maskedAadhaar: verification.maskedAadhaar,
+      verifiedData: verification.verifiedData,
+      message: 'Aadhaar OTP verified successfully',
+    }, 'Aadhaar OTP verified'));
+  } catch (error) {
+    logger.error('❌ Error in /aadhaar/otp/verify', { error: error.message });
+    return res.status(error.statusCode || 500).json(errorResponse(error.message, 'Aadhaar OTP verification failed'));
+  }
+});
+
 
 /**
  * GET /api/v1/verification/aadhaar/digilocker/status
