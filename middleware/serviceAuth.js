@@ -6,40 +6,23 @@ const logger = require('../config/logger');
  * Completely independent implementation
  */
 
-const VALID_TOKENS = new Set([
-  process.env.SERVICE_AUTH_TOKEN,
-  'X7fK9qP2Lm8VtR4zWc1YhN6DsB3aU5Jx',
-  'ExtraHand_Secure_Token_2024_MinLength32Chars_ChangeInProduction',
-].filter(Boolean));
-
 function serviceAuthMiddleware(req, res, next) {
   const token = req.headers['x-service-auth'];
-  
-  if (!token) {
-    logger.warn('Missing service authentication token', {
-      ip: req.ip,
-      path: req.path,
-      method: req.method
-    });
-    
-    return res.status(401).json({
-      success: false,
-      error: 'Missing service authentication token',
-      code: 'MISSING_SERVICE_AUTH'
-    });
-  }
+  const configuredToken = process.env.SERVICE_AUTH_TOKEN ? process.env.SERVICE_AUTH_TOKEN.trim() : null;
 
-  if (!VALID_TOKENS.has(token)) {
-    logger.warn('Invalid service authentication token', {
+  if (!token || !configuredToken || token !== configuredToken) {
+    logger.warn('Service authentication failed', {
       ip: req.ip,
       path: req.path,
-      method: req.method
+      method: req.method,
+      hasToken: Boolean(token),
+      hasConfiguredToken: Boolean(configuredToken),
     });
-    
+
     return res.status(401).json({
       success: false,
-      error: 'Invalid service authentication token',
-      code: 'INVALID_SERVICE_AUTH'
+      error: token ? 'Invalid service authentication token' : 'Missing service authentication token',
+      code: token ? 'INVALID_SERVICE_AUTH' : 'MISSING_SERVICE_AUTH'
     });
   }
 
