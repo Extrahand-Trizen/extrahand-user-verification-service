@@ -361,15 +361,9 @@ class CashfreeProvider extends BaseVerificationProvider {
         }
       },
       {
-        maxRetries: 2, // Fewer retries for OTP verification (user is waiting)
+        maxRetries: 1, // 1 attempt only: never retry single-use OTP verification, as UIDAI marks session as consumed/expired on retry
         initialDelay: 500,
-        onRetry: (attempt, error, delay) => {
-          logger.warn('🔄 [Cashfree] Retrying OTP verification', {
-            attempt,
-            errorCode: error.code,
-            nextDelay: delay
-          });
-        }
+        shouldRetry: () => false,
       }
     );
   }

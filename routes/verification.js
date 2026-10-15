@@ -265,12 +265,8 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, async (req, res) => {
       return res.status(400).json(errorResponse('Missing required field: userId', 'User ID is required'));
     }
 
-    if (!aadhaarNumber) {
-      return res.status(400).json(errorResponse('Missing required field: aadhaarNumber', 'Aadhaar number is required'));
-    }
-
-    const cleanNum = cleanAadhaarNumber(aadhaarNumber);
-    if (!isValidAadhaarFormat(cleanNum)) {
+    const cleanNum = aadhaarNumber ? cleanAadhaarNumber(aadhaarNumber) : '';
+    if (cleanNum && !isValidAadhaarFormat(cleanNum)) {
       return res.status(400).json(errorResponse('Invalid Aadhaar format', 'Aadhaar number must be 12 digits starting with 2-9'));
     }
 
@@ -278,11 +274,11 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, async (req, res) => {
       return res.status(400).json(errorResponse('Missing required image files', 'Both front and back Aadhaar card images are required'));
     }
 
-    const maskedAadhaar = maskAadhaar(cleanNum);
+    let maskedAadhaar = cleanNum ? maskAadhaar(cleanNum) : null;
 
     logger.info('🔀 [VERIFICATION SERVICE] Direct Aadhaar document verification initiated', {
       userId,
-      maskedAadhaar,
+      maskedAadhaar: maskedAadhaar || 'From Card Image',
       hasFront: !!targetFront,
       hasBack: !!targetBack,
       hasFrontCrop: !!targetFrontCrop,
@@ -412,6 +408,10 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, async (req, res) => {
       });
     }
 
+    if (!maskedAadhaar) {
+      maskedAadhaar = result.frontData?.maskedAadhaar || result.backData?.maskedAadhaar || null;
+    }
+
     verification.maskedAadhaar = maskedAadhaar;
     verification.ocrMetadata = {
       ...verification.ocrMetadata,
@@ -421,27 +421,35 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, async (req, res) => {
       internalCompletedAt: now,
     };
     const targetAddr = result.backData?.address || result.frontData?.address || verification.verifiedData?.address;
+    const extractedName = result.frontData?.name || verification.verifiedData?.name;
+    const extractedDob = result.frontData?.dob || result.backData?.dob || verification.verifiedData?.dob;
+    const extractedGender = result.frontData?.gender || result.backData?.gender || verification.verifiedData?.gender;
+
     verification.verifiedData = {
       ...verification.verifiedData,
-      name: result.frontData?.name || verification.verifiedData?.name,
-      dob: result.frontData?.dob || result.backData?.dob || verification.verifiedData?.dob,
+      name: extractedName,
+      dob: extractedDob,
+      gender: extractedGender,
       address: formatAddressObject(targetAddr),
     };
 
-    // If OTP was already verified, set full status to verified, otherwise mark ocr_verified
-    if (verification.otpVerified) {
-      verification.status = 'verified';
-      verification.verifiedAt = now;
-    } else {
-      verification.status = 'under_review'; // OCR verified, awaiting OTP
-    }
+    // Smart OCR verification complete - image-only verification marks as verified
+    verification.status = 'verified';
+    verification.verifiedAt = now;
     await verification.save();
 
     return res.json(successResponse({
       ...result,
+      status: 'verified',
+      overallStatus: 'verified',
       ocrStatus: 'VERIFIED',
-      otpVerified: !!verification.otpVerified,
-      overallStatus: verification.status,
+      maskedAadhaar,
+      name: extractedName,
+      dob: extractedDob,
+      gender: extractedGender,
+      address: formatAddressObject(targetAddr),
+      frontData: result.frontData,
+      backData: result.backData,
     }, 'Aadhaar document Smart OCR verified successfully'));
   } catch (error) {
     logger.error('❌ Error in /aadhaar/verify', { error: error.message });
@@ -618,8 +626,9 @@ router.post('/aadhaar/otp/verify', serviceAuthMiddleware, async (req, res) => {
       message: 'Aadhaar OTP verified successfully',
     }, 'Aadhaar OTP verified'));
   } catch (error) {
-    logger.error('❌ Error in /aadhaar/otp/verify', { error: error.message });
-    return res.status(error.statusCode || 500).json(errorResponse(error.message, 'Aadhaar OTP verification failed'));
+    const errorMsg = error?.message || (typeof error === 'string' ? error : 'Aadhaar OTP verification failed');
+    logger.error('❌ Error in /aadhaar/otp/verify', { error: errorMsg });
+    return res.status(error?.statusCode || 400).json(errorResponse(errorMsg, 'Aadhaar OTP verification failed'));
   }
 });
 
