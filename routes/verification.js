@@ -11,6 +11,7 @@ const { assertNoActiveOcrSession } = require('../services/sessionExclusionServic
 const { serviceAuthMiddleware } = require('../middleware/auth');
 const userService = require('../services/userService');
 const { isValidAadhaarFormat, cleanAadhaarNumber, maskAadhaar, isValidGstinFormat, cleanGstinNumber, maskGSTIN } = require('../utils/validation');
+const { validateOcrMappedResult, validateFrontBackConsistency } = require('../services/ocrValidationService');
 const { successResponse, errorResponse, getClientIp } = require('../utils/helpers');
 const logger = require('../config/logger');
 const axios = require('axios');
@@ -369,10 +370,93 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, async (req, res) => {
           side: 'back',
         });
 
+        // 1. Validate front OCR mapping and document verification status
+        const frontValidation = validateOcrMappedResult(frontOcr.mapped);
+        if (!frontValidation.accepted) {
+          logger.warn('Aadhaar front OCR validation rejected', {
+            userId,
+            reason: frontValidation.rejectReason,
+            code: frontValidation.code,
+            verificationStatus: frontOcr.mapped?.verificationStatus,
+          });
+          return res.status(400).json(errorResponse(
+            frontValidation.rejectReason || 'Front Aadhaar card image could not be verified',
+            'Invalid Aadhaar front image. Please upload a clear photo of the front side of your Aadhaar card.',
+            frontValidation.code || 'AADHAAR_FRONT_INVALID'
+          ));
+        }
+
+        // 2. Validate back OCR mapping and document verification status
+        const backValidation = validateOcrMappedResult(backOcr.mapped);
+        if (!backValidation.accepted) {
+          logger.warn('Aadhaar back OCR validation rejected', {
+            userId,
+            reason: backValidation.rejectReason,
+            code: backValidation.code,
+            verificationStatus: backOcr.mapped?.verificationStatus,
+          });
+          return res.status(400).json(errorResponse(
+            backValidation.rejectReason || 'Back Aadhaar card image could not be verified',
+            'Invalid Aadhaar back image. Please upload a clear photo of the back side of your Aadhaar card.',
+            backValidation.code || 'AADHAAR_BACK_INVALID'
+          ));
+        }
+
+        // 3. Validate consistency between front and back documents
+        const consistency = validateFrontBackConsistency(frontOcr.mapped, backOcr.mapped);
+        if (!consistency.accepted) {
+          logger.warn('Aadhaar front and back mismatch', {
+            userId,
+            reason: consistency.rejectReason,
+            code: consistency.code,
+          });
+          return res.status(400).json(errorResponse(
+            consistency.rejectReason || 'Front and back documents do not match',
+            'The front and back images appear to belong to different documents. Please upload front and back of the same Aadhaar card.',
+            consistency.code || 'AADHAAR_SIDES_MISMATCH'
+          ));
+        }
+
+        const frontName = frontOcr.mapped?.name;
+        const frontAadhaar = frontOcr.mapped?.maskedAadhaar;
+        const frontDob = frontOcr.mapped?.dob;
+        const backAddr = backOcr.mapped?.address;
+
+        // 4. Ensure essential Aadhaar fields were actually extracted from the images
+        if (!frontName && !frontAadhaar && !frontDob) {
+          logger.warn('Aadhaar OCR could not extract vital front details', { userId });
+          return res.status(400).json(errorResponse(
+            'Unable to extract Aadhaar details from front image',
+            'The uploaded front image does not appear to be a readable Aadhaar card. Please upload clear photos.',
+            'AADHAAR_EXTRACTION_FAILED'
+          ));
+        }
+
+        if (!backAddr && !backOcr.mapped?.maskedAadhaar) {
+          logger.warn('Aadhaar OCR could not extract back details or address', { userId });
+          return res.status(400).json(errorResponse(
+            'Unable to extract address from back image',
+            'The uploaded back image does not appear to contain a readable Aadhaar address. Please upload clear photos.',
+            'AADHAAR_BACK_EXTRACTION_FAILED'
+          ));
+        }
+
+        // 5. If Aadhaar number was provided, verify it matches the extracted card
+        if (cleanNum && frontAadhaar) {
+          const ocrLastFour = frontAadhaar.replace(/\D/g, '').slice(-4);
+          if (ocrLastFour && cleanNum.slice(-4) !== ocrLastFour) {
+            return res.status(400).json(errorResponse(
+              'Aadhaar number does not match uploaded card',
+              'The entered Aadhaar number does not match the digits on the uploaded Aadhaar card.',
+              'AADHAAR_NUMBER_MISMATCH'
+            ));
+          }
+        }
+
         result = {
           success: true,
           status: 'verified',
-          maskedAadhaar,
+          maskedAadhaar: frontAadhaar || backOcr.mapped?.maskedAadhaar || maskedAadhaar,
           frontData: frontOcr.mapped,
           backData: backOcr.mapped,
         };
@@ -420,13 +504,12 @@ router.post('/aadhaar/verify', serviceAuthMiddleware, async (req, res) => {
       backData: result.backData,
       internalCompletedAt: now,
     };
-    const targetAddr = result.backData?.address || result.frontData?.address || verification.verifiedData?.address;
-    const extractedName = result.frontData?.name || verification.verifiedData?.name;
-    const extractedDob = result.frontData?.dob || result.backData?.dob || verification.verifiedData?.dob;
-    const extractedGender = result.frontData?.gender || result.backData?.gender || verification.verifiedData?.gender;
+    const targetAddr = result.backData?.address || result.frontData?.address;
+    const extractedName = result.frontData?.name || result.backData?.name;
+    const extractedDob = result.frontData?.dob || result.backData?.dob;
+    const extractedGender = result.frontData?.gender || result.backData?.gender;
 
     verification.verifiedData = {
-      ...verification.verifiedData,
       name: extractedName,
       dob: extractedDob,
       gender: extractedGender,
